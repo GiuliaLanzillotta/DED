@@ -44,38 +44,17 @@ def inner_distillation(student_net:DictionaryNet, teacher_activations, x):
 
 
 def deep_inner_distillation(student_net, teacher_activations):
-    """ Distillation comparing the outputs of all network's layers. """
+    """ Distillation comparing the outputs of all networks' layers. 
+    We single out specific layers and force the student to match the teacher output given the same input."""
     loss = 0.
     count = 0
     for (n, m_s) in student_net.named_modules():
-        if n+"_out" in teacher_activations.keys(): 
+        if sum([p.numel() for p in m_s.parameters()])>0 and len(list(m_s.children()))==0: 
             act_t = teacher_activations[n+"_out"]
             x = teacher_activations[n+"_in"]
-            x = x[0]
             act_s = m_s(x)
             loss += F.mse_loss(act_s, act_t)
             count+=1
-    return loss/count #average across depth
-
-def kernel_inner_distillation(student_net:DictionaryNet, teacher_activations, x):
-    """ Distillation comparing the feature kernels of all network's layers. """
-    loss = 0.
-    count = 0
-    B = x.shape[0] # batch size
-    for n, act_s in teacher_activations.items(): 
-        if n=='fc': x = torch.flatten(x, 1)
-        act_t = teacher_activations[n] # it will throw an error if the two networks are different
-        act_s = student_net(x, name=n)
-        At = act_t.view(B,-1)
-        At = torch.div(At, At.norm(dim=1).view(B,1))
-        ker_t = torch.matmul(At, At.T)
-        act_s = student_net(x, name=n)
-        As = act_s.view(B,-1)
-        As = torch.div(As, As.norm(dim=1).view(B,1))
-        ker_s = torch.matmul(As, As.T)
-        loss += F.mse_loss(ker_t, ker_s)
-        count+=1
-        x = act_t
     return loss/count #average across depth
 
 

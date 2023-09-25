@@ -41,8 +41,7 @@ from torch.nn.utils import parameters_to_vector
 
 import shutil
 from utils.args import add_management_args, add_rehearsal_args
-from utils.conf import set_random_seed, get_device
-from utils.loggers import *
+from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
@@ -85,7 +84,6 @@ def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False
           return checkpoint
     return None 
 
-
 def parse_args(buffer=False):
     torch.set_num_threads(4)
     parser = ArgumentParser(description='script-experiment', allow_abbrev=False)
@@ -112,7 +110,8 @@ def parse_args(buffer=False):
                         help='The weight of labels vs logits in the distillation loss (when alpha=1 only true labels are used)')
     parser.add_argument('--MSE', default=False, action='store_true',
                         help='If provided, the MSE loss is used for the student with labels .')
-    parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla', 'topK', 'inner','topbottomK','randomK'],
+    parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla', 'topK', 'inner', 'inner-parallel',
+                                                                                     'topbottomK','randomK'],
                         help='Selects the distillation type, which determines the distillation loss.')
     parser.add_argument('--K', type=int, default=100, help='Number of activations to look at for *topK* distillation loss.')
     parser.add_argument('--N_BLOCKS', type=int, default=1, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
@@ -308,8 +307,6 @@ print("Starting buffer training ... ")
 start = time.time()
 # re-initialise model 
 buffer_model = resnet50(weights=None)
-# if args.distillation_type == 'inner': 
-#        buffer_model = DictionaryNet(buffer_model)
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
       buffer_model = torch.nn.DataParallel(buffer_model, device_ids=args.gpus_id).to(device)
@@ -344,19 +341,9 @@ if args.distillation_type == 'inner':
         register_module_hooks_network(buffer_model, args.N_BLOCKS)
         register_module_hooks_network(model, args.N_BLOCKS)
 
+if args.distillation_type == 'inner-parallel': 
+       register_module_hooks_network_deep(model, parallel=True)
 
-        # activation_student= {}
-        # def get_activation_student(name):
-        #         def hook(model, input, output):
-        #                 activation_student[name] = output
-        #         return hook
-
-        # for n,m in buffer_model.named_children():
-        #         if not isinstance(m, nn.ReLU) and \
-        #                 not isinstance(m,nn.MaxPool2d) and \
-        #                         not isinstance(m, nn.AdaptiveAvgPool2d):
-        #                 print(f'Registering hook for {n} *student')
-        #                 m.register_forward_hook(get_activation_student(n))
 
 
 results = []
@@ -389,6 +376,8 @@ for e in range(args.n_epochs_stud):
                        logits_loss = topK_distillation(outputs, logits, K=args.K)
                 elif args.distillation_type=='inner':
                        logits_loss, _ = mixed_inner_distillation_free(buffer_model.activation, model.activation, gamma=args.gamma)
+                elif args.distillation_type=='inner-parallel':
+                       logits_loss = deep_inner_distillation(buffer_model, model.activation)
                 elif args.distillation_type=='topbottomK':
                        logits_loss = topbottomK_distillation(outputs, logits, K=args.K)
                 elif args.distillation_type=='randomK': 
