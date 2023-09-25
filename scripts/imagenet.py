@@ -16,6 +16,7 @@ import sys
 import time
 
 
+
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(internal_path)
 sys.path.append(internal_path + '/datasets')
@@ -28,6 +29,7 @@ from argparse import ArgumentParser
 
 import setproctitle
 import torch
+import numpy as np
 
 from PIL import Image
 import torch.nn.functional as F
@@ -62,7 +64,7 @@ buffer_args = {
                 }
 
 LOGITS_MAGNITUDE_TEACHER = 14.5#19.9
-
+CHKPT_NAME = "rn50_2023-02-21_10-45-30_best.ckpt"
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "resnet50/"
@@ -72,13 +74,13 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
         shutil.copyfile(filename, path+'model_best.pth.tar')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "resnet50/"
+    path = base_path() + "chkpts" + "/" + "imagenet" + "/" + "resnet50/"
     if best: filepath = path + 'model_best.pth.tar'
     else: filepath = path + filename
     if os.path.exists(filepath):
           print(f"Loading existing checkpoint {filepath}")
           checkpoint = torch.load(filepath)
-          if filename=='checkpoint_90.pth.tar' and not distributed: # modify Sidak's checkpoint
+          if filename==CHKPT_NAME and not distributed: # modify Sidak's checkpoint
                 new_state_dict = {k.replace('module.','',1):v for (k,v) in checkpoint['state_dict'].items()}
                 checkpoint['state_dict'] = new_state_dict
           return checkpoint
@@ -211,9 +213,8 @@ if not args.pretrained:
         start_epoch = 0
 
 
-        if args.checkpoints: 
-                chkpt_name = f"checkpoint_90.pth.tar" #sidak's checkpoint
-                checkpoint = load_checkpoint(best=False, filename=chkpt_name, distributed=not args.distributed=='no') #TODO: switch best off
+        if args.checkpoints: # resuming training from the last point
+                checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
                 model.load_state_dict(checkpoint['state_dict'])
                 model.to(device)
                 optimizer.load_state_dict(checkpoint['optimizer'])
@@ -269,8 +270,12 @@ if not args.pretrained:
                         'best_acc': best_acc,
                         'optimizer' : optimizer.state_dict(),
                         'scheduler' : scheduler.state_dict()
-                        }, is_best, filename=chkpt_name)
+                        }, is_best, filename=CHKPT_NAME)
 
+else: 
+        checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
+        model.load_state_dict(checkpoint['state_dict'])
+        model.to(device)
 #val_acc = evaluate(model, val_loader, device)          
 final_val_acc_D = checkpoint['best_acc1']
 df = {'final_val_acc_D':final_val_acc_D}
@@ -362,7 +367,7 @@ for e in range(args.n_epochs_stud):
                 with torch.no_grad(): logits = model(inputs)
                 optimizer.zero_grad()
                 outputs = buffer_model(inputs)
-                #if args.distillation_type=='inner': outputs.detach()
+                if args.distillation_type=='inner-parallel': outputs.detach()
                 _, pred = torch.max(outputs.data, 1)
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()

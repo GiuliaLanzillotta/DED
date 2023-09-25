@@ -6,16 +6,10 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from backbone.ResNet18 import resnet18
 from PIL import Image
 from torch.utils.data import Dataset
 import torch
 
-from datasets.transforms.denormalization import DeNormalize
-from datasets.utils.continual_dataset import (ContinualDataset,
-                                              store_masked_loaders)
-from datasets.utils.validation import get_train_val
-from utils.conf import base_path_dataset as base_path
 
 
 class Cifar5MData: 

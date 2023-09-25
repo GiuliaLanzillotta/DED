@@ -4,8 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from argparse import ArgumentParser
-from datasets import NAMES as DATASET_NAMES
-from models import get_all_models
+
 
 
 def add_experiment_args(parser: ArgumentParser) -> None:
@@ -14,7 +13,7 @@ def add_experiment_args(parser: ArgumentParser) -> None:
     :param parser: the parser instance
     """
     parser.add_argument('--dataset', type=str, required=True,
-                        choices=DATASET_NAMES,
+                        choices=[],
                         help='Which dataset to perform experiments on.')
     parser.add_argument('--model', type=str, required=True,
                         help='Model name.', choices=get_all_models())

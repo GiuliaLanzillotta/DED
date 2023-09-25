@@ -24,6 +24,15 @@ class DictionaryNet(nn.Module):
               return self.net_forward(x)
          return self.module_forward(x, name)
 
+def unroll_layer_hierarchy(model, layer_name):
+    """ It returns an internal layer of the network by following the hierarchical structure.
+    takes a layer name, say layer1.0.conv1 and separates 
+    into its hierarchical components [layer1,0,conv1]. """
+    hierarchy = layer_name.split('.')
+    m = model
+    for level in hierarchy: 
+        m = getattr(m, level)
+    return m
 
 def register_hooks_layer(network:nn.Module, layer_name):
     """ Register forward hooks for a given network layer"""
@@ -33,9 +42,11 @@ def register_hooks_layer(network:nn.Module, layer_name):
                     network.activation[name] = output
             return hook
     print(f'Registering hook for {layer_name}')
-    m = getattr(network, layer_name)
+    #m = getattr(network, layer_name)
+    m = unroll_layer_hierarchy(network, layer_name)
     m.register_forward_hook(get_activation(layer_name))
     return network
+      
 
 def register_hooks_layer_input_output(network:nn.Module, layer_name):
     """ Register forward hooks for a given network layer"""
@@ -46,7 +57,7 @@ def register_hooks_layer_input_output(network:nn.Module, layer_name):
                     network.activation[name+"_out"] = output
             return hook
     print(f'Registering hook for {layer_name}')
-    m = getattr(network, layer_name)
+    m = unroll_layer_hierarchy(network, layer_name)
     m.register_forward_hook(get_activation(layer_name))
     return network
 
