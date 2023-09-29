@@ -9,6 +9,10 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils import parameters_to_vector
 
 
+def evaluate_regression(model, X, y):
+    """Evaluating a simple regression model"""
+    pred = model.predict(X)
+    return np.mean((pred-y)**2)
 
 def evaluate(model, val_loader, device, num_samples=-1):
     status = model.training

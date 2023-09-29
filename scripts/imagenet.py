@@ -112,8 +112,7 @@ def parse_args(buffer=False):
                         help='The weight of labels vs logits in the distillation loss (when alpha=1 only true labels are used)')
     parser.add_argument('--MSE', default=False, action='store_true',
                         help='If provided, the MSE loss is used for the student with labels .')
-    parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla', 'topK', 'inner', 'inner-parallel',
-                                                                                     'topbottomK','randomK'],
+    parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla', 'topK', 'inner', 'inner-parallel', 'topbottomK','randomK'],
                         help='Selects the distillation type, which determines the distillation loss.')
     parser.add_argument('--K', type=int, default=100, help='Number of activations to look at for *topK* distillation loss.')
     parser.add_argument('--N_BLOCKS', type=int, default=1, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
