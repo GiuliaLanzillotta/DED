@@ -8,7 +8,7 @@ import subprocess
 
 SEEDS = [11, 13, 21, 33, 55 ,5,138,228,196,118]
 BUFFER_SIZES = [200, 300, 400, 600, 700, 800, 900, 2000, 3000, 4000]
-NOISE = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+NOISE = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
 PARALLEL_ORDER = 10
 
 def crange(start, end, modulo):

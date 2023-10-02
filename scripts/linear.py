@@ -6,7 +6,12 @@
 
 """commands to run this script 
 python scripts/linear.py --problem_type regression --D 500 --N 10000 --buffer_size 100 --noise 1.0 --alpha 1.0 --data_seed 13
-python utils/linear_runs.py python scripts/linear.py --D 500 --N 10000 --data_seed 13 --nowand 1 --notes linear-regression-distillation --wandb_project DataEfficientDistillation
+python utils/linear_runs.py python scripts/linear.py --D 500 --G 300 --N 10000 --data_seed 13 --nowand 1 --notes linear-regression-distillation --wandb_project DataEfficientDistillation
+
+
+python scripts/linear.py --problem_type classification --nowand 1 --D 500 --N 10000  --C 2 --buffer_size 1000 --noise 10.0 --data_seed 13 --distillation_type hard_targets
+python utils/linear_runs.py python scripts/linear.py --problem_type classification --nowand 1 --D 500 --N 10000  --C 2 --data_seed 13 --distillation_type hard_targets
+
 
 """
 
@@ -23,6 +28,9 @@ from argparse import ArgumentParser
 import setproctitle
 import numpy as np
 
+import torch
+import torch.nn.functional as F
+
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(internal_path)
 sys.path.append(internal_path + '/datasets')
@@ -34,7 +42,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression
+from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression, evaluate_classification
 
 
 from sklearn.datasets import *
@@ -59,10 +67,13 @@ def parse_args():
     parser.add_argument('--C', type=int, default=1, help="Number of targets")
     parser.add_argument('--effective_rank', type=int, default=None, help="Effective rank of the input matrix")
     parser.add_argument('--noise', type=float, default=1.0, help="sd of the Gaussian noise added to the output")
+    parser.add_argument('--label_noise', type=float, default=0.0, help="percentage of label flips in classification task")
     parser.add_argument('--data_seed', type=int, help="seed used to generate the data")
     parser.add_argument('--alpha', type=float, default=0.5, required=True,
                         help='The weight of labels vs logits in the distillation loss (when alpha=1 only true labels are used)')
-
+    parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla','hard_targets'],
+                        help="distillation mechanism to use ... see the code for details")
+    
     add_management_args(parser)
     args = parser.parse_args()
     return args 
@@ -84,8 +95,8 @@ experiment_log = vars(args)
 # - load get dataset 
 # we use data generators from scikit : https://scikit-learn.org/stable/datasets/sample_generators.html#sample-generators
 #TODO: maybe store the data somewhere and load it?
+print("Creating dataset ... ")
 if args.problem_type=='regression':
-        print("Creating dataset ... ")
         # make_regression produces regression targets as an optionally-sparse 
         # random linear combination of random features, with noise. 
         # Its informative features may be uncorrelated, or low rank 
@@ -94,6 +105,10 @@ if args.problem_type=='regression':
                                 n_informative=args.G, n_targets=args.C, bias=0.0, 
                                 effective_rank=args.effective_rank, noise=args.noise, 
                                 shuffle=True, coef=True, random_state=args.data_seed)
+elif args.problem_type=='classification':
+       X, Y = make_blobs(n_samples=args.N+N_TEST, n_features=args.D, centers=args.C, 
+                         cluster_std=args.noise, random_state=args.data_seed, center_box=(0,1))
+       theta_star = np.zeros(args.D)
 
 # dividing in train and test sets 
 X_train = X[:-N_TEST,:]
@@ -102,13 +117,23 @@ X_test = X[-N_TEST:,:]
 Y_test = Y[-N_TEST:]
 
 print("..done")
+eval_fun = lambda x : 0 #dummy placeholder
+if args.problem_type=='regression':     
+        eval_fun = evaluate_regression
+elif args.problem_type=='classification':
+       eval_fun = evaluate_classification
 
 # - get the teacher model
 print("Fitting teacher model...")
 setproctitle.setproctitle('{}_{}_{}'.format(args.problem_type, args.buffer_size, "linear"))
-teacher = linear_model.LinearRegression()
+if args.problem_type=='regression':
+        teacher = linear_model.LinearRegression()
+elif args.problem_type=='classification':
+       teacher = linear_model.LogisticRegression(random_state=args.seed, 
+                                                 max_iter=200, penalty='none', 
+                                                 multi_class='multinomial')
 teacher.fit(X_train, Y_train)
-teacher_val_accuracy = evaluate_regression(teacher, X_test, Y_test)
+teacher_val_accuracy = eval_fun(teacher, X_test, Y_test)
 theta_teacher = teacher.coef_
 teacher_optimum_distance = np.linalg.norm(theta_star-theta_teacher)
 
@@ -127,7 +152,6 @@ if not args.nowand:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
         args.wandb_url = wandb.run.get_url()
-device = get_device([0]) # returns the first device in the list
 print(file=sys.stderr)
 
 # create the student dataset 
@@ -143,15 +167,29 @@ Y_left_out = Y[left_out_indices]
 
 print("Starting buffer training ... ")
 start = time.time()
-# initialise student model and the targets to use
-student = linear_model.LinearRegression()
-teacher_predictions = teacher.predict(X_buffer)
-targets = args.alpha * Y_buffer + (1-args.alpha)*teacher_predictions
+# initialise student model 
+if args.problem_type=='regression' or (args.distillation_type=='vanilla' and args.alpha==0):
+        student = linear_model.LinearRegression() #note here 
+else: student = linear_model.LogisticRegression(random_state=args.seed, 
+                                                 max_iter=200, penalty='none', 
+                                                 multi_class='multinomial')
+# set the targets to use
+labels = Y_buffer
+teacher_predictions = 0
+if args.alpha < 1:
+        if args.problem_type=='regression' or args.distillation_type=='hard_targets':
+                teacher_predictions = teacher.predict(X_buffer)
+        elif args.problem_type=='classification':  
+                teacher_predictions = teacher.predict_proba(X_buffer)
+                labels = F.one_hot(torch.tensor(Y_buffer), num_classes=args.C).detach().to(float).numpy()
+targets = args.alpha * labels + (1-args.alpha)*teacher_predictions
+
+       
 # train the student model 
 student.fit(X_buffer, targets)
-student_train_accuracy = evaluate_regression(student, X_buffer, Y_buffer)
-student_val_accuracy = evaluate_regression(student, X_test, Y_test)
-student_left_out_accuracy = evaluate_regression(student, X_left_out, Y_left_out)
+student_train_accuracy = eval_fun(student, X_buffer, Y_buffer)
+student_val_accuracy = eval_fun(student, X_test, Y_test)
+student_left_out_accuracy = eval_fun(student, X_left_out, Y_left_out)
 teacher_student_distance = np.linalg.norm(student.coef_-theta_teacher)
 student_optimum_distance = np.linalg.norm(student.coef_-theta_star)
 

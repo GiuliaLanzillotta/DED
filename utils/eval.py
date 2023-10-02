@@ -14,6 +14,14 @@ def evaluate_regression(model, X, y):
     pred = model.predict(X)
     return np.mean((pred-y)**2)
 
+def evaluate_classification(model, X, y):
+    """Evaluating a simple regression model"""
+    pred = model.predict(X)
+    if len(pred.shape)>1: #predicting probabilities
+          pred = np.max(pred, 1)
+    correct = np.sum(pred == y)
+    return correct/X.shape[0]
+
 def evaluate(model, val_loader, device, num_samples=-1):
     status = model.training
     model.eval()
