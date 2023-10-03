@@ -4,6 +4,22 @@ import torch.nn as nn
 from torch import Tensor
 import torch.nn.functional as F
 
+
+class LinearNet(nn.Module):
+     
+     def __init__(self, dim_in, dim_out, **kwargs) -> None:
+          super().__init__()
+          self.dim_in, self.dim_out = dim_in, dim_out
+          self.layer = nn.Linear(dim_in, dim_out, bias=kwargs.get('bias',True))
+
+     def forward(self, x): 
+          return self.layer(x)
+     
+     def predict(self, x):
+          return self.forward(x)
+
+
+
 class DictionaryNet(nn.Module):
 
     def __init__(self, network, *args, **kwargs) -> None:
