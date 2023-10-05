@@ -6,9 +6,8 @@
 
 
 """commands to run this script 
-python scripts/linear_network.py --gpus_id 0 --problem_type regression --D 500 --G 500 --N 10000  --C 1 --buffer_size 600 --noise 1.0 --alpha 0.0 --data_seed 13 --lr 0.00001  --batch_size 200 --n_epochs 20 --n_epochs_stud 20 --notes linearnet-script --wandb_project DataEfficientDistillation
-python utils/linear_runs.py python scripts/linear_network_classification.py  --nowand 1 --gpus_id 0  --D 500 --G 500 --N 10000  --C 10 --buffer_size 600 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
-
+python scripts/linear_network_classification.py  --nowand 1  --D 500 --G 500 --N 10000  --C 10 --buffer_size 600 --noise 3.0 --alpha 0.0 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
+python utils/linear_runs.py scripts/linear_network_classification.py  --nowand 1  --D 500 --G 500 --N 10000  --C 10 --buffer_size 600 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
 """
 
 
@@ -38,7 +37,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression, evaluate_classification
+from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression, evaluate_classification, instant_eval, instant_function_distance
 
 
 from sklearn.datasets import *
@@ -72,8 +71,6 @@ def load_checkpoint(problem_type, best=False, filename='checkpoint.pth.tar'):
 
 def parse_args():
     parser = ArgumentParser(description='linear-experiment', allow_abbrev=False)
-    parser.add_argument('--problem_type', type=str, default='regression', choices=['regression','classification','clutering'],
-                        help="the type of problem to be solved")
     parser.add_argument('--N', type=int, default=10000, help="Dataset size")
     parser.add_argument('--buffer_size', type=int, default=100, help="(Random) data subset size")
     parser.add_argument('--D', type=int, default=100, help="Number of input features")
@@ -122,7 +119,7 @@ if args.seed is not None:
         set_random_seed(args.seed)
 print(args)
 
-setproctitle.setproctitle('{}_{}_{}'.format(args.problem_type, args.buffer_size, "linearnet"))
+setproctitle.setproctitle('{}_{}_{}'.format("classification", args.buffer_size, "linearnet"))
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
@@ -134,7 +131,7 @@ experiment_log = vars(args)
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "linearnet", args.problem_type, args.conf_timestamp])
+                name = str.join("-",["offline", "linearnet", "classification", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -144,23 +141,10 @@ print(file=sys.stderr)
 # we use data generators from scikit : https://scikit-learn.org/stable/datasets/sample_generators.html#sample-generators
 #TODO: maybe store the data somewhere and load it?
 print("Creating dataset ... ")
-if args.problem_type=='regression':
-        # make_regression produces regression targets as an optionally-sparse 
-        # random linear combination of random features, with noise. 
-        # Its informative features may be uncorrelated, or low rank 
-        # (few features account for most of the variance).
-        X, Y, theta_star = make_regression(n_samples=args.N+N_TEST, n_features=args.D, 
-                                n_informative=args.G, n_targets=args.C, bias=0.0, 
-                                effective_rank=args.effective_rank, noise=args.noise, 
-                                shuffle=True, coef=True, random_state=args.data_seed)
-elif args.problem_type=='classification':
-       X, Y = make_blobs(n_samples=args.N+N_TEST, n_features=args.D, centers=args.C, 
-                         cluster_std=args.noise, random_state=args.data_seed, center_box=(0,1))
-       theta_star = np.zeros(args.D)
-
+X, Y = make_blobs(n_samples=args.N+N_TEST, n_features=args.D, centers=args.C, 
+                cluster_std=args.noise, random_state=args.data_seed, center_box=(0,1))
 X = torch.Tensor(X).to(device)
-Y = torch.Tensor(Y).to(device)
-if args.problem_type=='classification': Y = Y.type(torch.LongTensor) 
+Y = torch.Tensor(Y).to(device).type(torch.LongTensor) 
 # dividing in train and test sets 
 X_train = X[:-N_TEST,:]
 Y_train = Y[:-N_TEST]
@@ -168,11 +152,6 @@ X_test = X[-N_TEST:,:]
 Y_test = Y[-N_TEST:]
 
 print("..done") 
-eval_fun = lambda x : 0 #dummy placeholder
-if args.problem_type=='regression':     
-        eval_fun = evaluate_regression
-elif args.problem_type=='classification':
-       eval_fun = evaluate_classification
 
 # - get the teacher model
 teacher = LinearNet(dim_in=args.D, dim_out=args.C).to(device)
@@ -185,11 +164,10 @@ if not args.pretrained:
                                    weight_decay=args.optim_wd, 
                                    momentum=args.optim_mom)
 
-       if args.problem_type=='classification': best_acc = 0.
-       else: best_acc = 10e14 # arbitrarily high number
+       best_acc = 0.
        start_epoch = 0
        if args.checkpoints: # resuming training from the last point
-                checkpoint = load_checkpoint(problem_type=args.problem_type, best=False) #TODO: switch best off
+                checkpoint = load_checkpoint(problem_type="classification", best=False) #TODO: switch best off
                 if checkpoint: 
                         teacher.load_state_dict(checkpoint['state_dict'])
                         teacher.to(device)
@@ -209,13 +187,11 @@ if not args.pretrained:
                         inputs = inputs.to(device)
                         labels = labels.to(device)
                         outputs = teacher(inputs)
-                        if args.problem_type=='classification':
-                                _, pred = torch.max(outputs.data, 1)
-                                correct += torch.sum(pred == labels).item()
-                                total += labels.shape[0]
-                                loss = F.cross_entropy(outputs, labels) #TODO: maybe MSE?
-                        else: 
-                                loss = F.mse_loss(outputs, labels)
+                        _, pred = torch.max(outputs.data, 1)
+                        correct += torch.sum(pred == labels).item()
+                        total += labels.shape[0]
+                        loss = F.cross_entropy(outputs, labels) #TODO: maybe MSE?
+                
                         loss.backward()
                         optimizer.step()
 
@@ -224,13 +200,11 @@ if not args.pretrained:
                         avg_loss += loss
 
                 with torch.no_grad():
-                        if args.problem_type=='classification': train_acc = correct/total * 100
-                        else: train_acc = eval_fun(teacher, X_train, Y_train)
-                        val_acc = eval_fun(teacher, X_test, Y_test)
+                        train_acc = correct/total * 100
+                        val_acc = instant_eval(teacher, X_test, Y_test, device)
 
                 # best val accuracy -> selection bias on the validation set
-                if args.problem_type=='classification': is_best = val_acc > best_acc
-                else: is_best = val_acc < best_acc
+                is_best = val_acc > best_acc
                 best_acc = max(val_acc, best_acc)
 
                 print('\Train accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
@@ -239,7 +213,7 @@ if not args.pretrained:
                 df = {'epoch_loss_D':avg_loss/X.shape[0],
                 'epoch_train_acc_D':train_acc,
                 'epoch_val_acc_D':val_acc}
-                wandb.log(df)
+                if not args.nowand: wandb.log(df)
 
 
                 if args.checkpoints: 
@@ -248,15 +222,15 @@ if not args.pretrained:
                         'state_dict': teacher.state_dict(),
                         'best_acc': best_acc,
                         'optimizer' : optimizer.state_dict()
-                        }, is_best, problem_type=args.problem_type)
+                        }, is_best, problem_type="classification")
 
 else: 
-        checkpoint = load_checkpoint(problem_type=args.problem_type, best=False) #TODO: switch best off
+        checkpoint = load_checkpoint(problem_type="classification", best=False) #TODO: switch best off
         teacher.load_state_dict(checkpoint['state_dict'])
         teacher.to(device)
 
 teacher.eval()
-teacher_val_accuracy = eval_fun(teacher, X_test, Y_test)
+teacher_val_accuracy = instant_eval(teacher, X_test, Y_test, device)
 experiment_log['final_val_acc_D'] = teacher_val_accuracy
 print("...done")
 # start the training 
@@ -290,7 +264,7 @@ for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
         avg_loss = 0.0
-        correct, agreement = 0.0, 0.0
+        correct, agreement, function_distance = 0.0, 0.0, 0.0
         for i in range(0, args.buffer_size, args.batch_size):
                 if args.debug_mode and i > 3: # only 3 batches in debug mode
                         break
@@ -299,56 +273,56 @@ for e in range(args.n_epochs_stud):
                 labels = Y_buffer[i:upper_bound]
                 inputs, labels = inputs.to(device), labels.to(device)
                 with torch.no_grad(): logits = teacher(inputs)
+                
                 optimizer.zero_grad()
                 outputs = student(inputs)
                 
                 # the distillation loss
                 logits_loss = vanilla_distillation(outputs, logits)
                 # the labels loss 
-                if args.problem_type=='classification':
-                        if args.MSE: labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=args.C).to(torch.float))  # Bobby's correction
-                        else: labels_loss = F.cross_entropy(outputs, labels)
-                else: labels_loss = F.mse_loss(outputs, labels) 
+                if args.MSE: labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=args.C).to(torch.float))  # Bobby's correction
+                else: labels_loss = F.cross_entropy(outputs, labels)
                 loss = alpha*labels_loss + (1-alpha)*logits_loss
+
                 loss.backward()
                 optimizer.step()
                 
-                if args.problem_type=='classification':
-                        _, pred = torch.max(outputs.data, 1)
-                        _, pred_t = torch.max(logits.data, 1)
-                        correct += torch.sum(pred == labels).item()
-                        agreement += torch.sum(pred == pred_t).item()
-                else: agreement += labels_loss
+                _, pred = torch.max(outputs.data, 1)
+                _, pred_t = torch.max(logits.data, 1)
+                correct += torch.sum(pred == labels).item()
+                agreement += torch.sum(pred == pred_t).item()
+                with torch.no_grad(): 
+                       function_distance += torch.sum(torch.norm(F.softmax(outputs, dim=1)-F.softmax(logits, dim=1), dim=1, p=2)).item()
 
                 assert not math.isnan(loss)
                 progress_bar.prog(i, args.buffer_size, e, 'S', loss.item())
                 avg_loss += loss
 
         avg_loss = avg_loss/args.buffer_size
-                
-        if args.problem_type=='classification': 
-                train_acc = correct/args.buffer_size * 100
-                train_agreement = (agreement/args.buffer_size) * 100
-        else: 
-               train_acc = eval_fun(student, X_buffer, Y_buffer)
-               train_agreement = (agreement/args.buffer_size)
+        train_acc = correct/args.buffer_size * 100
+        train_agreement = (agreement/args.buffer_size) * 100
+        function_distance = function_distance/args.buffer_size
 
-        train_leftout_acc = eval_fun(student, X_left_out, Y_left_out)
+        train_leftout_acc = instant_eval(student, X_left_out, Y_left_out, device)
         teacher_student_distance = distance_models(teacher, student)
-        val_acc = eval_fun(student, X_test, Y_test)
+        val_acc = instant_eval(student, X_test, Y_test, device)
+        val_function_distance = instant_function_distance(student, teacher, X_test, Y_test, device)
 
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
         print('Train left-out accuracy : {} %'.format(round(train_leftout_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
         
-        df = {'epoch_loss_S':avg_loss,
-              'epoch_train_acc_S':train_acc,
-              'epoch_train_agreement':train_agreement,
-              'epoch_distance_teacher_student':teacher_student_distance,
-              'epoch_train_leftout_acc_S':train_leftout_acc,
-              'epoch_val_acc_S':val_acc}
-        wandb.log(df)
+        if not args.nowand:
+                df = {'epoch_loss_S':avg_loss,
+                        'epoch_train_acc_S':train_acc,
+                        'epoch_train_agreement':train_agreement,
+                        'epoch_train_function_distance':function_distance,
+                        'epoch_distance_teacher_student':teacher_student_distance,
+                        'epoch_train_leftout_acc_S':train_leftout_acc,
+                        'epoch_val_acc_S':val_acc, 
+                        'epoch_val_function_distance':val_function_distance}
+                wandb.log(df)
 
 
 print("Training completed. Full evaluation and logging...")
@@ -361,6 +335,8 @@ experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 experiment_log['final_train_leftout_acc_S'] = train_leftout_acc
 experiment_log['final_val_acc_S'] = val_acc
+experiment_log['final_train_function_distance'] = function_distance
+experiment_log['final_val_function_distance'] = val_function_distance
 experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
 
@@ -370,7 +346,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + args.problem_type + "/" + "linearnet" 
+path = base_path() + "results" + "/" + "classification" + "/" + "linearnet" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

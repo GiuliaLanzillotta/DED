@@ -47,7 +47,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models
+from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
 
 try:
     import wandb
@@ -356,7 +356,7 @@ for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
         avg_loss = 0.0
-        correct, total, agreement = 0.0, 0.0, 0.0
+        correct, total, agreement, function_distance = 0.0, 0.0, 0.0, 0.0
         for i, data in enumerate(buffer_loader):
                 if args.debug_mode and i>10:
                        break
@@ -371,6 +371,7 @@ for e in range(args.n_epochs_stud):
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()
                 agreement += torch.sum(pred == pred_t).item()
+                function_distance += torch.sum(torch.norm(F.softmax(outputs, dim=1)-F.softmax(logits, dim=1), dim=1, p=2)).item()
                 total += labels.shape[0]
                 
                 # the distillation loss
@@ -405,9 +406,10 @@ for e in range(args.n_epochs_stud):
         
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100
+        train_function_distance = function_distance/total
         train_leftout_acc = evaluate(buffer_model, train_leftout_loader, device, num_samples=args.validate_subset)
         teacher_student_distance = distance_models(model, buffer_model)
-        val_acc = evaluate(buffer_model, val_loader, device, num_samples=args.validate_subset)
+        val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device, num_samples=args.validate_subset)
         results.append(val_acc)
         # measure distance in parameter space between the teacher and student models 
 
@@ -419,9 +421,12 @@ for e in range(args.n_epochs_stud):
         df = {'epoch_loss_S':avg_loss,
               'epoch_train_acc_S':train_acc,
               'epoch_train_agreement':train_agreement,
+              'epoch_train_function_distance':train_function_distance,
               'epoch_distance_teacher_student':teacher_student_distance,
               'epoch_train_leftout_acc_S':train_leftout_acc,
-              'epoch_val_acc_S':val_acc}
+              'epoch_val_acc_S':val_acc,
+              'epoch_val_agreement':val_agreement,
+              'epoch_val_function_distance':val_function_distance}
         wandb.log(df)
 
 
@@ -431,12 +436,14 @@ end = time.time()
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 train_leftout_acc = evaluate(buffer_model, train_leftout_loader, device, num_samples=len(val_loader)) #restricting the number of samples otw it takes ages
-val_acc, val_agreement = validation_and_agreement(buffer_model, model, val_loader, device)
+val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device)
 
 experiment_log['final_train_leftout_acc_S'] = train_leftout_acc
 experiment_log['final_val_acc_S'] = val_acc
 experiment_log['final_train_agreement'] = train_agreement
+experiment_log['final_train_function_distance'] = train_function_distance
 experiment_log['final_val_agreement'] = val_agreement
+experiment_log['final_val_function_distance'] = val_function_distance
 experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
 
