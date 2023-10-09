@@ -7,7 +7,7 @@
 
 """commands to run this script 
 python scripts/linear_network_classification.py  --nowand 1  --D 500 --G 500 --N 10000  --C 10 --buffer_size 600 --noise 3.0 --alpha 0.0 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
-python utils/linear_runs.py scripts/linear_network_classification.py  --nowand 1  --D 500 --G 500 --N 10000  --C 10 --buffer_size 600 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
+python utils/linear_runs.py python scripts/linear_network_classification.py  --nowand 1  --D 500 --G 500 --N 10000  --C 10 --data_seed 13 --lr 0.01  --batch_size 32 --n_epochs 20 --n_epochs_stud 40 --notes linearnet-script --wandb_project DataEfficientDistillation
 """
 
 
