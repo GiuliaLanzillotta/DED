@@ -125,9 +125,9 @@ for k in range(NUM_SAMPLES_F):
             with torch.no_grad():
                 inputs, labels = data
                 inputs, labels = inputs.to(device), labels.to(device)
-                outputs_f = fnet(inputs)
-                outputs_t = teacher(inputs)
-                risk += F.cross_entropy(outputs_f, labels)
+                labels = F.one_hot(labels, num_classes=C).to(torch.float)
+                outputs_f = F.softmax(fnet(inputs),dim=1)
+                risk += F.mse_loss(outputs_f, labels, reduction='sum')
                 total+=labels.shape[0]
 
             progress_bar.prog(i, len(all_data_loader), -1, k, risk.item()/total )  
@@ -152,10 +152,11 @@ for k in range(NUM_SAMPLES_F):
             with torch.no_grad():
                 inputs, labels = data
                 inputs, labels = inputs.to(device), labels.to(device)
-                outputs_f = fnet(inputs)
-                outputs_t = teacher(inputs)
-                e_risk+=F.cross_entropy(outputs_f, labels)
-                d_risk+=F.cross_entropy(outputs_f, F.softmax(outputs_t, dim=1))
+                labels = F.one_hot(labels, num_classes=C).to(torch.float)
+                outputs_f = F.softmax(fnet(inputs),dim=1)
+                outputs_t = F.softmax(teacher(inputs),dim=1)
+                e_risk+=F.mse_loss(outputs_f, labels, reduction='sum')
+                d_risk+=F.mse_loss(outputs_f, outputs_t, reduction='sum')
                 total_subset+=labels.shape[0]
 
             progress_bar.prog(i, len(subset_loader), s, k, (e_risk-d_risk).item()/total_subset)  
@@ -166,8 +167,8 @@ for k in range(NUM_SAMPLES_F):
 
         risk_log = {}
         risk_log['risk'] = risk/len(all_data_loader)
-        risk_log['e_risk'] = e_risk/total_subset if total_subset>0 else None
-        risk_log['d_risk'] = d_risk/total_subset if total_subset>0 else None
+        risk_log['e_risk'] = e_risk/total_subset
+        risk_log['d_risk'] = d_risk/total_subset
         risk_log['subset_size'] = total_subset
         risk_log['subset_fraction'] = SUBSET_P
         risk_log['s'] = s
