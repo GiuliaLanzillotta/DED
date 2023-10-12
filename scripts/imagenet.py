@@ -6,6 +6,12 @@
 # https://pytorch.org/vision/0.8/datasets.html#imagenet
 # https://www.image-net.org/about.php 
 
+"""
+example commands: 
+
+python scripts/imagenet.py --alpha 1 --gpus_id 0 --buffer_size 30000 --debug_mode 1 --distillation_type vanilla --validate_subset 5000 --batch_size 64 --pretrained --checkpoints --notes imagenet-gilmetrics-distillation --wandb_project DataEfficientDistillation
+
+"""
 
 import importlib
 import json
@@ -225,6 +231,8 @@ if not args.pretrained:
         for epoch in range(start_epoch, args.n_epochs):
                 avg_loss = 0.0
                 correct, total = 0.0, 0.0
+                if args.debug_mode and epoch > 3:
+                       break
                 for i, data in enumerate(train_loader):
                         if args.debug_mode and i > 3: # only 3 batches in debug mode
                                 break
@@ -356,6 +364,7 @@ for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
         avg_loss = 0.0
+        best_acc = 0.0
         correct, total, agreement, function_distance = 0.0, 0.0, 0.0, 0.0
         for i, data in enumerate(buffer_loader):
                 if args.debug_mode and i>10:
@@ -411,6 +420,7 @@ for e in range(args.n_epochs_stud):
         teacher_student_distance = distance_models(model, buffer_model)
         val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device, num_samples=args.validate_subset)
         results.append(val_acc)
+        is_best = val_acc > best_acc 
         # measure distance in parameter space between the teacher and student models 
 
 
@@ -437,6 +447,17 @@ experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 train_leftout_acc = evaluate(buffer_model, train_leftout_loader, device, num_samples=len(val_loader)) #restricting the number of samples otw it takes ages
 val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device)
+
+if args.checkpoints: 
+        save_checkpoint({
+        'epoch': e + 1,
+        'state_dict': buffer_model.state_dict(),
+        'best_acc': val_acc,
+        'optimizer' : optimizer.state_dict(),
+        'scheduler' : scheduler.state_dict()
+        }, False, filename=f'rn50-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+
+
 
 experiment_log['final_train_leftout_acc_S'] = train_leftout_acc
 experiment_log['final_val_acc_S'] = val_acc

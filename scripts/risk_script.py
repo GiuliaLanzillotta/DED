@@ -6,12 +6,10 @@ import os
 import socket
 import sys
 import time
+import numpy as np
 
 mammoth_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(mammoth_path)
-sys.path.append(mammoth_path + '/datasets')
-sys.path.append(mammoth_path + '/backbone')
-sys.path.append(mammoth_path + '/models')
 sys.path.append(mammoth_path + '/utils')
 
 
@@ -34,20 +32,22 @@ from utils.status import ProgressBar
 from torch.nn.functional import one_hot, softmax
 
 
-
-NUM_SAMPLES_F = 100
-DEVICE=[0] #NOTE fix this to whatever GPU you want to use
+CHKPT_NAME = "rn50_2023-02-21_10-45-30_best.ckpt"
+NUM_SAMPLES_F = 1000
+NUM_SUBSET_SAMPLES = 100
+SUBSET_P = 0.05 # encoding the percentage of data that (on average) is included in the subset 
+DEVICE=[3] #NOTE fix this to whatever GPU you want to use
 device = get_device(DEVICE)
 
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "resnet50/"
+    path = base_path() + "chkpts" + "/" + "imagenet" + "/" + "resnet50/"
     if best: filepath = path + 'model_best.pth.tar'
     else: filepath = path + filename
     if os.path.exists(filepath):
           print(f"Loading existing checkpoint {filepath}")
           checkpoint = torch.load(filepath)
-          if filename=='checkpoint_90.pth.tar' and not distributed: # modify Sidak's checkpoint
+          if filename==CHKPT_NAME and not distributed: # modify Sidak's checkpoint
                 new_state_dict = {k.replace('module.','',1):v for (k,v) in checkpoint['state_dict'].items()}
                 checkpoint['state_dict'] = new_state_dict
           return checkpoint
@@ -85,17 +85,19 @@ val_dataset = ImageFolder(imagenet_root+'val', inference_transform)
 
 all_data = ConcatDataset([train_dataset, val_dataset])
 all_data_loader = DataLoader(
-        all_data, batch_size=64, shuffle=True,
-        num_workers=4, pin_memory=True)
+        all_data, batch_size=256, shuffle=True,num_workers=4, pin_memory=True)
+
+all_indices = set(range(len(all_data)))
 
 
 
 # initialising the network: we need a teacher and many students 
 teacher = resnet50(weights=None)
 chkpt_name = f"checkpoint_90.pth.tar" #sidak's checkpoint
-checkpoint = load_checkpoint(best=False, filename=chkpt_name, distributed=False) #TODO: switch best off
+checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=False) #TODO: switch best off
 teacher.load_state_dict(checkpoint['state_dict'])
 teacher.to(device)
+teacher.eval()
 best_acc1 = checkpoint['best_acc1']
 
 
@@ -105,51 +107,71 @@ C = 1000
 path = base_path() + "results" + "/" + "imagenet" + "/" + "resnet50" 
 if not os.path.exists(path): os.makedirs(path)
 
+
 for k in range(NUM_SAMPLES_F): 
     # initialising network k 
     #if k==2: break # for testing
     fnet = resnet50(weights=None)
     fnet.apply(weights_init_uniform)
     fnet.to(device)
-
-    # computing the statistics 
-    progress_bar = ProgressBar(verbose=True)
-
-    sum1_delta = 0; sum2_delta = 0; sum1_ce = 0; sum2_ce = 0; total = 0
+    fnet.eval()
 
     print(f"Ready to go with network {k}!")
 
+    print(f"Evaluating on all the data ...")
+    risk = 0; total = 0
+    progress_bar = ProgressBar(verbose=True)
     for i, data in enumerate(all_data_loader):
-        #if i==10: break # for testing
-        with torch.no_grad():
-            inputs, labels = data
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs_f = fnet(inputs)
-            outputs_t = teacher(inputs)
-            delta = softmax(outputs_t.view(-1,C)) - one_hot(labels, num_classes=C).view(-1,C)
-            l_delta = F.cross_entropy(outputs_f, delta)
-            l_ce = F.cross_entropy(outputs_f, labels)
+            with torch.no_grad():
+                inputs, labels = data
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs_f = fnet(inputs)
+                outputs_t = teacher(inputs)
+                risk += F.cross_entropy(outputs_f, labels)
+                total+=labels.shape[0]
 
-            sum1_delta += l_delta.sum()
-            sum2_delta += (l_delta**2).sum()
-            sum1_ce += l_ce.sum()
-            sum2_ce += (l_ce**2).sum()
+            progress_bar.prog(i, len(all_data_loader), -1, k, risk.item()/total )  
 
-            total += labels.shape[0]
-
-            running_delta = (sum2_delta/total - (sum1_delta/total)**2)*(1/(total-1)) + (sum1_delta/total)**2
-            running_ce = (sum2_ce/total - (sum1_ce/total)**2)*(1/(total-1))
-            
-        progress_bar.prog(i, len(all_data_loader), running_delta.item(), 'D', running_ce.item())  
+        # check type of risks variables ...
+    if isinstance(risk, torch.Tensor): risk = risk.item()
 
 
-    delta_var = (sum2_delta/total - (sum1_delta/total)**2)*(total/(total-1))
-    ce_var = (sum2_ce/total - (sum1_ce/total)**2)*(total/(total-1))
+    for s in range(NUM_SUBSET_SAMPLES): # each corresponds to a different dataset draw
 
-    inequality_log = {}
-    inequality_log['deltaV'] = delta_var.item()
-    inequality_log['deltaM'] = (sum1_delta/total).item()
-    inequality_log['ceV'] = ce_var.item()
+        # computing the statistics 
+        progress_bar = ProgressBar(verbose=True)
+        e_risk=0; d_risk=0; total_subset = 0
 
-    with open(path+ "/LVI.txt", 'a') as f:
-            f.write(json.dumps(inequality_log) + '\n')
+        print(f"Random subset {s+1}/{NUM_SUBSET_SAMPLES} ...")
+
+        random_indices = np.random.choice(list(all_indices), size=int(SUBSET_P*len(all_indices)), replace=False)
+        subset = Subset(all_data, random_indices)
+        subset_loader =  DataLoader(subset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
+
+        for i, data in enumerate(subset_loader):
+            with torch.no_grad():
+                inputs, labels = data
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs_f = fnet(inputs)
+                outputs_t = teacher(inputs)
+                e_risk+=F.cross_entropy(outputs_f, labels)
+                d_risk+=F.cross_entropy(outputs_f, F.softmax(outputs_t, dim=1))
+                total_subset+=labels.shape[0]
+
+            progress_bar.prog(i, len(subset_loader), s, k, (e_risk-d_risk).item()/total_subset)  
+
+        # check type of risks variables ...
+        if isinstance(e_risk, torch.Tensor): e_risk = e_risk.item()
+        if isinstance(d_risk, torch.Tensor): d_risk = d_risk.item()
+
+        risk_log = {}
+        risk_log['risk'] = risk/len(all_data_loader)
+        risk_log['e_risk'] = e_risk/total_subset if total_subset>0 else None
+        risk_log['d_risk'] = d_risk/total_subset if total_subset>0 else None
+        risk_log['subset_size'] = total_subset
+        risk_log['subset_fraction'] = SUBSET_P
+        risk_log['s'] = s
+        risk_log['k'] = k
+ 
+        with open(path+ "/RISK.txt", 'a') as f:
+                f.write(json.dumps(risk_log) + '\n')

@@ -19,7 +19,7 @@ K = [10, 50, 100, 200, 500]
 N_BLOCKS = [2,3,4,5]
 #NUM_GPUS_PER_COMMAND = 2 
 PARALLEL_ORDER = 4
-GPUIDS = [4, 5, 6, 7]
+GPUIDS = [0, 1, 2, 5]
 
 def crange(start, end, modulo):
     # implementing circular range
@@ -39,7 +39,7 @@ gpu_count=0
 job_count=0
 
 for buf_size in BUFFER_SIZES: 
-    for alpha in [0.0, 1.0]:
+    for alpha in [1.0]:
         for seed in SEEDS:
             #for k in K: # for topK distillation
             #for b in N_BLOCKS: # inner block distillation
