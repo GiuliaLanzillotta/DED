@@ -13,13 +13,13 @@ from copy import copy
 import subprocess
 
 
-SEEDS = [11,13,21, 33, 55]#33,55,5,138,228,196,118
-BUFFER_SIZES = [30000, 90000]#[480000]#, 480000]#[60000]#[360000, 480000] #1200, 12000, 60000
+SEEDS = [11, 13, 21, 33, 55]#33,55,5,138,228,196,118
+BUFFER_SIZES = [1281167]#[480000]#, 480000]#[60000]#[360000, 480000] #1200, 12000, 60000, 90000
 K = [10, 50, 100, 200, 500]
 N_BLOCKS = [2,3,4,5]
 #NUM_GPUS_PER_COMMAND = 2 
-PARALLEL_ORDER = 4
-GPUIDS = [0, 1, 2, 5]
+PARALLEL_ORDER = 2
+GPUIDS = [7, 7]
 
 def crange(start, end, modulo):
     # implementing circular range

@@ -55,21 +55,21 @@ class Cifar5M(Dataset):
     Defines Cifar - 5 Million dataset. See https://github.com/preetum/cifar5m for reference. 
     """
 
-    normalize = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    transform = transforms.Compose([
-            transforms.ToTensor(),
-            normalize])
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225]) # using Imagenet statistics
+    
 
     def __init__(self, root: str, data:Cifar5MData,  train: bool = True, 
                  augmentations: Optional[nn.Module] = None) -> None:
         """Initialised a dataset from a data object (already loaded)"""
         self.root = root
         self.train = train
+        self.transform = transforms.Compose([transforms.ToTensor(), self.normalize])
 
         assert data.loaded, "Load the data first"
         
         if augmentations is not None: 
-            self.transform = torch.transforms.Compose([self.transform, augmentations])
+            self.transform = transforms.Compose([self.transform, augmentations])
         
         if train: 
             self.data = data.data_train

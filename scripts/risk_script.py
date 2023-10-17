@@ -1,3 +1,8 @@
+"""
+
+Error note: when using the data from the script, need to divide the risk value by the batch size - because it was only divided by the number of batches
+"""
+
 
 import importlib
 import json
@@ -166,7 +171,7 @@ for k in range(NUM_SAMPLES_F):
         if isinstance(d_risk, torch.Tensor): d_risk = d_risk.item()
 
         risk_log = {}
-        risk_log['risk'] = risk/len(all_data_loader)
+        risk_log['risk'] = risk/len(all_data)
         risk_log['e_risk'] = e_risk/total_subset
         risk_log['d_risk'] = d_risk/total_subset
         risk_log['subset_size'] = total_subset

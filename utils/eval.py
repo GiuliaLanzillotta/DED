@@ -10,6 +10,16 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils import parameters_to_vector
 
 
+def hellinger(p, q):
+        """ The Hellinger distance is a bounded metric on the space of 
+        probability distributions over a given probability space.
+         See https://en.wikipedia.org/wiki/Hellinger_distance
+         """
+        if torch.is_tensor(p): 
+               p = p.detach().cpu().numpy()
+               q = q.detach().cpu().numpy()
+        return np.linalg.norm(np.sqrt(p) - np.sqrt(q), ord=2, axis=1)/(np.sqrt(2))
+
 def evaluate_regression(model, X, y):
     """Evaluating a simple regression model"""
     pred = model.predict(X)
@@ -137,7 +147,8 @@ def validation_agreement_function_distance(student, teacher, val_loader, device,
                         _, pred_t = torch.max(outputs_t.data, 1)
                         correct += torch.sum(pred_s == labels).item()
                         agreement += torch.sum(pred_s == pred_t).item()
-                        function_distance += torch.sum(torch.norm(F.softmax(outputs_s, dim=1)-F.softmax(outputs_t, dim=1), dim=1, p=2)).item()
+                        prob_s = F.softmax(outputs_s, dim=1); prob_t = F.softmax(outputs_t, dim=1)
+                        function_distance += np.sum(hellinger(prob_s, prob_t))
                         total += labels.shape[0]
                                 
         acc=(correct / total) * 100
@@ -145,6 +156,7 @@ def validation_agreement_function_distance(student, teacher, val_loader, device,
         function_distance = (function_distance / total)
         student.train(status)
         return acc, agreement, function_distance
+
 
 def distance_models(teacher, student):
        """Measuring the distance between the models in parameter space"""

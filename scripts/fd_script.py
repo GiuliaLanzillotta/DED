@@ -3,6 +3,8 @@ Script to evaluate the functional distance of trained students
 to the teacher and labels. 
 
 
+#TODO: re-do with hellinger distance for better interpretability https://en.wikipedia.org/wiki/Hellinger_distance 
+
 notes:we evaluated 30k-alpha=0 so far 
 
 """
@@ -36,7 +38,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression
+from utils.eval import evaluate, validation_and_agreement, distance_models, evaluate_regression, hellinger
 
 
 # Evaluating the distribution of |f(x)-t(x)| 
@@ -46,9 +48,10 @@ from torch.utils.data import ConcatDataset
 
 DEVICE=[5] #NOTE 
 CHKPT_NAME = "rn50_2023-02-21_10-45-30_best.ckpt"
-SEEDS = [21,33]
-BUFFER_SIZES = [30000,90000]
-ALPHA = [0.0,1.0]
+SEEDS = [11,13,21]
+BUFFER_SIZES = [30000, 90000]
+ALPHA = [1.0,0.0]
+TRAIN_SUBSET = 200000
 
 device = get_device(DEVICE)
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
@@ -91,6 +94,12 @@ val_dataset = ImageFolder(imagenet_root+'val', inference_transform)
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=4, pin_memory=False)
 val_loader = DataLoader(val_dataset, batch_size=128, shuffle=True, num_workers=4, pin_memory=False)
 
+all_indices = set(range(len(train_dataset)))
+random_indices = np.random.choice(list(all_indices), size=TRAIN_SUBSET, replace=False)
+train_subset = Subset(train_dataset, random_indices)
+train_subset_loader =  DataLoader(train_subset, batch_size=128, shuffle=True, num_workers=4, pin_memory=True)
+
+
 # loading the teacher
 teacher = resnet50(weights=None)
 checkpoint = load_checkpoint(device, best=False, filename=CHKPT_NAME, distributed=False) 
@@ -101,8 +110,8 @@ teacher.eval()
 
 
 is_train = False
-loader = train_loader if is_train else val_loader
-filename = "FDIST" + "_test.txt" if not is_train else ".txt"
+loader = train_subset_loader if is_train else val_loader
+filename = "FDIST" + "_test.txt" if not is_train else "FDIST.txt"
 count=0
 total = len(SEEDS)*4
 for buffer_size in BUFFER_SIZES:
@@ -130,8 +139,8 @@ for buffer_size in BUFFER_SIZES:
                                     labels = F.one_hot(labels, num_classes=1000).to(torch.float)
                                     outputs_s = F.softmax(student(inputs),dim=1)
                                     outputs_t = F.softmax(teacher(inputs),dim=1)
-                                    distance_t = torch.norm(outputs_s-outputs_t, dim=1, p=2).tolist()
-                                    distance_l = torch.norm(outputs_s-labels, dim=1, p=2).tolist()
+                                    distance_t = hellinger(outputs_s,outputs_t).tolist()
+                                    distance_l = hellinger(outputs_s,labels).tolist()
                             progress_bar.prog(i, len(loader), count, 'train data' if is_train else 'val data', distance_t[0])
                             
                             distance_log = {}
