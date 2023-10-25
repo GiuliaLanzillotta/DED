@@ -42,7 +42,7 @@ NUM_SAMPLES_F = 1000
 NUM_SUBSET_SAMPLES = 100
 SUBSET_P = 0.05 # encoding the percentage of data that (on average) is included in the subset 
 DEVICE=[3] #NOTE fix this to whatever GPU you want to use
-device = get_device(DEVICE)
+device = get_device(DEVICE) 
 
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
