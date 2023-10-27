@@ -10,7 +10,7 @@ We use as a student a network significantly smaller than the teacher.
 
 example commands: 
 
-python scripts/cifar5m.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 120000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m_small.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 20000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5msmall-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -59,7 +59,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
+from utils.eval import evaluate, validation_and_agreement, validation_agreement_function_distance
 from datasets.data_utils import load_dataset
 
 try:
@@ -69,14 +69,23 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
 AUGMENT = True
+TEACHER_DATA_SIZE = 1000000
 
 def setup_optimizerNscheduler(args, model, stud=False):
-        if not stud: 
-               #TODO recipe: https://github.com/pytorch/vision/pull/5935
-               pass
-        if stud: epochs = args.n_epochs_stud
-        else: epochs = args.n_epochs
-        if not args.optim_adam:
+        if not stud: # following the pytorch recipe for resnext101: https://github.com/pytorch/vision/pull/5935
+               optimizer = torch.optim.SGD(model.parameters(), 
+                                lr=0.5, 
+                                weight_decay=0.00002, 
+                                momentum=args.optim_mom,
+                                nesterov=args.optim_nesterov)
+               scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs-5)
+               warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
+                                                                     start_factor=0.01, 
+                                                                     total_iters=5)
+               return optimizer, scheduler
+
+
+        if not args.optim_adam: # standard optimizer config
                 optimizer = torch.optim.SGD(model.parameters(), 
                                 lr=args.lr, 
                                 weight_decay=args.optim_wd, 
@@ -90,7 +99,7 @@ def setup_optimizerNscheduler(args, model, stud=False):
         if not args.optim_cosineanneal: 
                 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
         else: 
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs-args.optim_warmup)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs_stud-args.optim_warmup)
 
         if args.optim_warmup > 0: # initialise warmup scheduler
                 warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
@@ -164,8 +173,13 @@ args.conf_host = socket.gethostname()
 if args.seed is not None:
         set_random_seed(args.seed)
 
-# dataset -> cifar100 for the teacher and cifar5m for the student
-C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
+# dataset ->cifar5m
+print(f"Randomly drawing {TEACHER_DATA_SIZE} samples for the Cifar5M base")
+C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
+all_indices = set(range(len(C5m_train)))
+random_indices = np.random.choice(list(all_indices), 
+                size=TEACHER_DATA_SIZE, replace=False)
+teacher_train_subset = Subset(C5m_train, random_indices)
 
 # initialising the model
 teacher = resnext101_64x4d(num_classes=10) 
@@ -193,14 +207,14 @@ progress_bar = ProgressBar(verbose=not args.non_verbose)
 
 
 print(file=sys.stderr)
-train_loader = DataLoader(C10_train, batch_size=args.batch_size, 
+train_loader = DataLoader(teacher_train_subset, batch_size=args.batch_size, 
                           shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(C10_val, batch_size=args.batch_size, 
+val_loader = DataLoader(C5m_test, batch_size=args.batch_size, 
                         shuffle=False, num_workers=4, pin_memory=False)
 
 
 
-CHKPT_NAME = f'mnet-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'resnext101-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
@@ -289,8 +303,6 @@ df = {'final_val_acc_D':final_val_acc_D}
 wandb.log(df)
 
 
-C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
-
 
 print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
 teacher.eval() # set the main model to evaluation
@@ -374,7 +386,6 @@ for e in range(args.n_epochs):
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100      
         # measure distance in parameter space between the teacher and student models 
-        teacher_student_distance = distance_models(teacher, student)
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
         results.append(val_acc)
@@ -387,7 +398,6 @@ for e in range(args.n_epochs):
         df = {'epoch_loss_S':avg_loss,
               'epoch_train_acc_S':train_acc,
               'epoch_train_agreement':train_agreement,
-              'epoch_distance_teacher_student':teacher_student_distance,
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement}
         wandb.log(df)
@@ -413,7 +423,6 @@ experiment_log['final_val_acc_S'] = val_acc
 experiment_log['final_train_agreement'] = train_agreement
 experiment_log['final_val_agreement'] = val_agreement
 experiment_log['final_val_function_distance'] = val_function_distance
-experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
 
 if not args.nowand:
@@ -421,7 +430,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + "mnet" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + "small" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

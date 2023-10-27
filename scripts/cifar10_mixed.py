@@ -13,7 +13,7 @@ by training with ERM.
 
 example commands: 
 
-python scripts/cifar10_mixed.py --seed 11  --reset_optim --gpus_id 0 --teacher_off --distil_proportion 1.0 --batch_size 128  --checkpoints --notes cifar10-mixeddistillation --wandb_project DataEfficientDistillation
+python scripts/cifar10_mixed.py --seed 11  --gpus_id 0 --teacher_off --distil_proportion 0.4 --batch_size 128  --checkpoints --notes cifar10-mixeddistillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
