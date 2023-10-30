@@ -10,7 +10,7 @@ We use as a student a network significantly smaller than the teacher.
 
 example commands: 
 
-python scripts/cifar5m_small.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 20000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5msmall-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m_small.py --seed 11 --alpha 0 --gpus_id 1 --buffer_size 20000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5msmall-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -193,7 +193,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "cifar5m", "mnet", args.conf_timestamp])
+                name = str.join("-",["offline", "cifar5m", "small", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -304,7 +304,7 @@ wandb.log(df)
 
 
 
-print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
+print(f"Randomly drawing {args.buffer_size} samples from Cifar5M")
 teacher.eval() # set the main model to evaluation
 all_indices = set(range(len(C5m_train)))
 random_indices = np.random.choice(list(all_indices), 

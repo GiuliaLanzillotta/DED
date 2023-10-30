@@ -9,7 +9,7 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m_recurrent.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-recurrent-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m_recurrent.py --seed 11 --alpha 0 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-recurrent-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -196,7 +196,7 @@ val_loader = DataLoader(C10_val, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'mnet-student-11-24000-1.0.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'mnet-student-11-24000-0.0.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
