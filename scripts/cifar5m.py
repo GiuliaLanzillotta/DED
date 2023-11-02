@@ -161,7 +161,15 @@ if args.seed is not None:
         set_random_seed(args.seed)
 
 # dataset -> cifar100 for the teacher and cifar5m for the student
-C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
+#C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
+
+C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
+
+
+print(f"Randomly drawing {60000} samples for the Cifar5M base")
+all_indices = set(range(len(C5m_train)))
+random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
+teacher_data = Subset(C5m_train, random_indices)
 
 # initialising the model
 teacher = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
@@ -189,9 +197,9 @@ progress_bar = ProgressBar(verbose=not args.non_verbose)
 
 
 print(file=sys.stderr)
-train_loader = DataLoader(C10_train, batch_size=args.batch_size, 
+train_loader = DataLoader(teacher_data, batch_size=args.batch_size, 
                           shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(C10_val, batch_size=args.batch_size, 
+val_loader = DataLoader(C5m_test, batch_size=args.batch_size, 
                         shuffle=False, num_workers=4, pin_memory=False)
 
 
@@ -285,17 +293,14 @@ df = {'final_val_acc_D':final_val_acc_D}
 wandb.log(df)
 
 
-C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
-
-
 print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
 teacher.eval() # set the main model to evaluation
-all_indices = set(range(len(C5m_train)))
+
 random_indices = np.random.choice(list(all_indices), 
                 size=args.buffer_size, replace=False)
 
-train_subset = Subset(C5m_train, random_indices)
-buffer_loader =  DataLoader(train_subset, 
+student_data = Subset(C5m_train, random_indices)
+buffer_loader =  DataLoader(student_data, 
                             batch_size=args.batch_size, 
                             shuffle=True, 
                             num_workers=2,  

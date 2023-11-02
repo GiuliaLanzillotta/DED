@@ -300,6 +300,9 @@ buffer_loader =  DataLoader(train_subset,
                             shuffle=True, 
                             num_workers=2,  
                             pin_memory=False)
+val_loader = DataLoader(C5m_test, batch_size=args.batch_size, 
+                        shuffle=False, num_workers=4, pin_memory=False)
+
 #NOTE we keep the val loader of C100 for comparison
 # val_loader = DataLoader(C5m_test, batch_size=args.batch_size, 
 #                         shuffle=False, num_workers=3, pin_memory=True)
