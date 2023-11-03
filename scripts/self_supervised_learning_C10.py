@@ -2,10 +2,10 @@
 Author: Giulia Lanzillotta
 Date: Wed 1st of Nov
 
-Self-supervised learning script: training a model on some data using SSL. 
+Self-supervised learning script: training a model on Cifar10 data using SimCLR.
 
 
-python scripts/self_supervised_learning.py --validate_subset 2000 --seed 11 --gpus_id 2 --batch_size 128  --checkpoints --notes SSL-imagenet-rn18 --wandb_project DataEfficientDistillation
+python scripts/self_supervised_learning_C10.py --seed 11 --gpus_id 7 --batch_size 512  --checkpoints --notes SSL-cifar10-rn18 --wandb_project DataEfficientDistillation
 
 
 """
@@ -20,7 +20,7 @@ import time
 
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(internal_path)
-sys.path.append(internal_path + '/datasets')
+sys.path.append(internal_path + '/dataset_utils')
 sys.path.append(internal_path + '/utils')
 
 
@@ -40,7 +40,7 @@ from torchvision.datasets import ImageNet, ImageFolder, CIFAR10
 from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, resnet18, googlenet, efficientnet_b0, mobilenet_v3_large, resnext101_64x4d
 import torchvision.transforms as transforms
 from torch.nn.utils import parameters_to_vector
-
+from tqdm import tqdm
 
 import shutil
 from utils.args import add_management_args, add_rehearsal_args
@@ -48,7 +48,6 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from datasets.data_utils import load_dataset
 
 try:
     import wandb
@@ -56,9 +55,58 @@ except ImportError:
     wandb = None
 
 
+def test(net, train_data_loader, test_data_loader, t):
+    """ Following https://github.com/leftthomas/SimCLR/blob/master/main.py 
+    
+    test using weighted knn to find the most similar images' label to assign the test image
+    """
+    k = 200 # knn parameter
+    c = 10 # cifar10 classes
+    net.eval()
+    total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
+    with torch.no_grad():
+        # generate feature bank
+        for data, target in tqdm(train_data_loader, desc='Feature extracting'):
+            feature = net(data.cuda(non_blocking=True))
+            feature_bank.append(feature)
+        # [D, N]
+        feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
+        # [N]
+        feature_labels = torch.tensor(train_data_loader.dataset.targets, device=feature_bank.device)
+        # loop test data to predict the label by weighted knn search
+        test_bar = tqdm(test_data_loader)
+        for data, target in test_bar:
+            data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            feature = net(data)
+
+            total_num += data.size(0)
+            # compute cos similarity between each feature vector and feature bank ---> [B, N]
+            sim_matrix = torch.mm(feature, feature_bank)
+            # [B, K]
+            sim_weight, sim_indices = sim_matrix.topk(k=k, dim=-1)
+            # [B, K]
+            sim_labels = torch.gather(feature_labels.expand(data.size(0), -1), dim=-1, index=sim_indices)
+            sim_weight = (sim_weight / t).exp()
+
+            # counts for each class
+            one_hot_label = torch.zeros(data.size(0) * k, c, device=sim_labels.device)
+            # [B*K, C]
+            one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1), value=1.0)
+            # weighted score ---> [B, C]
+            pred_scores = torch.sum(one_hot_label.view(data.size(0), -1, c) * sim_weight.unsqueeze(dim=-1), dim=1)
+
+            pred_labels = pred_scores.argsort(dim=-1, descending=True)
+            total_top1 += torch.sum((pred_labels[:, :1] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            total_top5 += torch.sum((pred_labels[:, :5] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            test_bar.set_description('Acc@1:{:.2f}% Acc@5:{:.2f}%'
+                                     .format(total_top1 / total_num * 100, total_top5 / total_num * 100))
+
+    return total_top1 / total_num * 100, total_top5 / total_num * 100
+
+
 
 def setup_optimizerNscheduler(args, model, stud=False):
-        optimizer = torch.optim.AdamW(model.parameters(), 
+        optimizer = torch.optim.Adam(model.parameters(), 
                         lr=args.lr, 
                         weight_decay=args.optim_wd)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
@@ -68,14 +116,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "rn18-ssl/"
+    path = base_path() + "/chkpts" + "/" + "cifar10" + "/" + "rn18-ssl/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "imagenet" + "/" + "rn18-ssl/"
+    path = base_path() + "chkpts" + "/" + "cifar10" + "/" + "rn18-ssl/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -88,21 +136,20 @@ def parse_args(buffer=False):
     torch.set_num_threads(4)
     parser = ArgumentParser(description='script-experiment', allow_abbrev=False)
     parser.add_argument('--distributed', type=str, default='no', choices=['no', 'dp', 'ddp'])
-    parser.add_argument('--lr', type=float, default=5e-3, help='Learning rate.')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
-    parser.add_argument('--optim_wd', type=float, default=1e-4, help='optimizer weight decay.')
+    parser.add_argument('--optim_wd', type=float, default=1e-6, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
     parser.add_argument('--optim_mom', type=float, default=0, help='optimizer momentum.')
     parser.add_argument('--optim_warmup', type=int, default=5, help='Number of warmup epochs.')
     parser.add_argument('--optim_nesterov', default=False, action='store_true', help='optimizer nesterov momentum.')
     parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
     parser.add_argument('--n_epochs', type=int, default=500, help='Number of epochs.')
-    parser.add_argument('--n_epochs_stud', type=int, default=30, help='Number of student epochs.')
-    parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
+    parser.add_argument('--batch_size', type=int, default = 512, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
-    parser.add_argument('--temperature', type=float, default=0.07, help='The temperature parameter for nll')
+    parser.add_argument('--temperature', type=float, default=0.5, help='The temperature parameter for nll')
 
     add_management_args(parser)
 
@@ -121,61 +168,20 @@ class ContrastiveTransformations(object):
         return [self.base_transforms(x) for i in range(self.n_views)]
 
 def info_nce_loss(outputs, t):
-        # Calculate cosine similarity
-        cos_sim = F.cosine_similarity(outputs[:,None,:], outputs[None,:,:], dim=-1)
-        # Mask out cosine similarity to itself
-        self_mask = torch.eye(cos_sim.shape[0], dtype=torch.bool, device=cos_sim.device)
-        cos_sim.masked_fill_(self_mask, -9e15)
-        # Find positive example -> batch_size//2 away from the original example
-        pos_mask = self_mask.roll(shifts=cos_sim.shape[0]//2, dims=0)
-        # InfoNCE loss
-        cos_sim = cos_sim / t # temperature
-        nll = -cos_sim[pos_mask] + torch.logsumexp(cos_sim, dim=-1)
-        nll = nll.mean()
+        # [2*B, 2*B]
+        batch_size = outputs.shape[0]//2
+        sim_matrix = torch.exp(torch.mm(outputs, outputs.t().contiguous()) / t)
+        mask = (torch.ones_like(sim_matrix) - torch.eye(batch_size*2, device=sim_matrix.device)).bool()
+        # [2*B, 2*B-1]
+        sim_matrix = sim_matrix.masked_select(mask).view(batch_size*2, -1)
+        # compute loss
+        pos_sim = torch.exp(torch.sum(outputs[:batch_size] * outputs[batch_size:], dim=-1) / t)
+        # [2*B]
+        pos_sim = torch.cat([pos_sim, pos_sim], dim=0)
+        loss = (- torch.log(pos_sim / sim_matrix.sum(dim=-1))).mean()
 
-        return nll, cos_sim, pos_mask
-     
-def evaluate_similarity(cos_sim, pos_mask):
-        # Get ranking position of positive example
-        comb_sim = torch.cat([cos_sim[pos_mask][:,None],  # First position positive example
-                                cos_sim.masked_fill(pos_mask, -9e15)],
-                                dim=-1)
-        sim_argsort = comb_sim.argsort(dim=-1, descending=True).argmin(dim=-1)
-        # Logging ranking metrics
-        acc = (sim_argsort == 0).float().mean()
-        acc_pos = 1+sim_argsort.float().mean()
-        return acc, acc_pos
-
-def validation(val_loader, model, t, num_samples):
-        status = model.training
-        model.eval()
-        if num_samples >0: 
-                # we select a subset of the validation dataset to validate on 
-                # note: a different random sample is used every time
-                random_indices = np.random.choice(range(len(val_loader.dataset)), size=num_samples, replace=False)
-                _subset = Subset(val_loader.dataset, random_indices)
-                val_loader =  DataLoader(_subset, 
-                                        batch_size=val_loader.batch_size, 
-                                        shuffle=False, num_workers=4, pin_memory=False)
-        acc, acc_pos, total = 0.0, 0.0, 0.0
-        for i,data in enumerate(val_loader):
-                with torch.no_grad():
-                        inputs, _ = data
-                        inputs = torch.cat(inputs, dim=0)
-                        inputs = inputs.to(device)
-                        outputs = model(inputs)
-                        loss, C, M = info_nce_loss(outputs, args.temperature)
-                        total += inputs.shape[0]
-                        _acc, _acc_pos = evaluate_similarity(C,M)
-                        acc += _acc
-                        acc_pos += _acc_pos
-                                          
-        acc=(acc / total) * 100
-        acc_poss=(acc_pos / total) * 100
-
-        model.train(status)
-        return acc.item(), acc_pos.item()
-
+        return loss
+  
 
 args = parse_args()
 # Add uuid, timestamp and hostname for logging
@@ -187,31 +193,32 @@ if args.seed is not None:
         set_random_seed(args.seed)
 
 
-# dataset -> imagenet
-imagenet_root = "/local/home/stuff/imagenet/"
+# dataset -> cifar10
+cifar10_root = '../continually/data/'
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
+                                std=[0.229, 0.224, 0.225])
 
 # transformations: Overall, for our experiments, we apply a set of 5 transformations following 
 # the original SimCLR setup: random horizontal flip, crop-and-resize, color distortion, 
 # random grayscale, and gaussian blur. 
-contrast_transforms = transforms.Compose([transforms.RandomHorizontalFlip(),
-                                          transforms.RandomResizedCrop(size=256),
-                                          transforms.RandomApply([
-                                              transforms.ColorJitter(brightness=0.5,
-                                                                     contrast=0.5,
-                                                                     saturation=0.5,
-                                                                     hue=0.1)
-                                          ], p=0.8),
-                                          transforms.RandomGrayscale(p=0.2),
-                                          transforms.GaussianBlur(kernel_size=9),
-                                          transforms.ToTensor(),
-                                          normalize,
-                                         ])
+train_transform = transforms.Compose([
+    transforms.RandomResizedCrop(32),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
-train_dataset = ImageFolder(imagenet_root+'train', ContrastiveTransformations(contrast_transforms, n_views=2))
-val_dataset = ImageFolder(imagenet_root+'val', ContrastiveTransformations(contrast_transforms, n_views=2))
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+train_dataset = CIFAR10(root=cifar10_root, train=True, transform=ContrastiveTransformations(train_transform, n_views=2))
+another_train_dataset = CIFAR10(root=cifar10_root, train=True, transform=test_transform)
+val_dataset = CIFAR10(root=cifar10_root, train=False, transform=test_transform)
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
+                          shuffle=True, num_workers=4, pin_memory=True)
+another_train_loader = DataLoader(another_train_dataset, batch_size=args.batch_size, 
                           shuffle=True, num_workers=4, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
                         shuffle=False, num_workers=4, pin_memory=False)
@@ -248,7 +255,7 @@ progress_bar = ProgressBar(verbose=not args.non_verbose)
 
 print(file=sys.stderr)
 
-CHKPT_NAME = f'rn18-ssl-imagenet-2.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'rn18-ssl-cifar10.ckpt' # obtaineed with seed = 11
 
 model.train()
 optimizer, scheduler = setup_optimizerNscheduler(args, model)
@@ -273,7 +280,6 @@ print("Starting training using SimCLR objective...")
 
 for epoch in range(start_epoch, args.n_epochs):
         avg_loss = 0.0
-        avg_acc, avg_acc_pos = 0.0, 0.0
         total = 0.0
         if args.debug_mode and epoch > 3:
                 break
@@ -285,45 +291,37 @@ for epoch in range(start_epoch, args.n_epochs):
                 inputs = torch.cat(inputs, dim=0)
                 inputs = inputs.to(device)
                 outputs = model(inputs)
-                loss, C, M = info_nce_loss(outputs, args.temperature)
+                # normalise the outputs 
+                outputs = F.normalize(outputs, dim=-1)
+                loss = info_nce_loss(outputs, args.temperature)
                 loss.backward()
                 optimizer.step()
 
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(train_loader), epoch, 'SSL', loss.item())
-                avg_loss += loss
+                avg_loss += loss*inputs.shape[0]
                 total += inputs.shape[0]
 
-                _acc, _acc_pos = evaluate_similarity(C,M)
-                avg_acc += _acc.item()
-                avg_acc_pos += _acc_pos.item()
-
-
-
-        avg_acc  = (avg_acc/total)*100
-        avg_acc_pos  = (avg_acc_pos/total)*100
+        test_acc_1, test_acc_5 = test(model, another_train_loader, val_loader, t=args.temperature)
+        val_acc = test_acc_1
         avg_loss = avg_loss/len(train_loader)
 
         if scheduler is not None:
                 scheduler.step()
         
-        val_acc, val_acc_pos = validation(val_loader, model, args.temperature, args.validate_subset)
         
 
         # best val accuracy -> selection bias on the validation set
         is_best = val_acc > best_acc
         best_acc = max(val_acc, best_acc)
 
-        print('\Train accuracy : {} %'.format(round(avg_acc, 2)), file=sys.stderr)
-        print('\Train accuracy positive : {} %'.format(round(avg_acc_pos, 2)), file=sys.stderr)
-        print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
-        print('\Val accuracy positive : {} %'.format(round(val_acc_pos, 2)), file=sys.stderr)
+        print('\Train loss : {} %'.format(round(avg_loss.item(), 2)), file=sys.stderr)
+        print('\Val accuracy top-1: {} %'.format(round(test_acc_1, 2)), file=sys.stderr)
+        print('\Val accuracy top-5 : {} %'.format(round(test_acc_5, 2)), file=sys.stderr)
         
         df = {'epoch_loss':avg_loss,
-        'epoch_train_acc':avg_acc,
-        'epoch_train_acc_pos':avg_acc_pos,
-        'epoch_val_acc':val_acc,
-        'epoch_val_acc_pos':val_acc_pos}
+        'epoch_val_acctop1':test_acc_1,
+        'epoch_val_acctop5':test_acc_5}
         wandb.log(df)
 
         if args.checkpoints and (is_best or epoch==args.n_epochs-1):
@@ -332,7 +330,7 @@ for epoch in range(start_epoch, args.n_epochs):
                 'state_dict': model.state_dict(),
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
+                'scheduler' : scheduler.state_dict() if scheduler else None
                 }, is_best, filename=CHKPT_NAME)
         
 final_val_acc_D = val_acc
