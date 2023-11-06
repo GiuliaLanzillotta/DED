@@ -5,9 +5,10 @@ Date: Wed 1st of Nov
 Self-supervised learning script: training a model on Cifar10 data using SimCLR.
 
 
-python scripts/self_supervised_learning_C10.py --seed 11 --gpus_id 6 --batch_size 128  --checkpoints --notes SSL-cifar10-rn50 --wandb_project DataEfficientDistillation
+python scripts/self_supervised_learning_imagenet.py --seed 11 --gpus_id 0 --batch_size 8  --checkpoints --notes SSL-imagenet-rn50 --wandb_project DataEfficientDistillation
 
 Original paper: https://arxiv.org/pdf/2002.05709.pdf
+
 
 """
 
@@ -115,14 +116,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar10" + "/" + "rn50-ssl/"
+    path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "rn50-ssl/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar10" + "/" + "rn50-ssl/"
+    path = base_path() + "chkpts" + "/" + "imagenet" + "/" + "rn50-ssl/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -170,8 +171,8 @@ class Model(nn.Module):
         # encoder
         self.f = nn.Sequential(*self.f)
         # projection head
-        self.g = nn.Sequential(nn.Linear(2048, 128, bias=False), nn.BatchNorm1d(128),
-                               nn.ReLU(inplace=True), nn.Linear(128, feature_dim, bias=True))
+        self.g = nn.Sequential(nn.Linear(2048, 512, bias=False), nn.BatchNorm1d(512),
+                               nn.ReLU(inplace=True), nn.Linear(512, feature_dim, bias=True))
 
     def forward(self, x):
         x = self.f(x)
@@ -216,16 +217,16 @@ if args.seed is not None:
         set_random_seed(args.seed)
 
 
-# dataset -> cifar10
-cifar10_root = '../continually/data/'
+# dataset -> imagenet
+imagenet_root = "/local/home/stuff/imagenet/"
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
+                                 std=[0.229, 0.224, 0.225])
 
 # transformations: Overall, for our experiments, we apply a set of 5 transformations following 
 # the original SimCLR setup: random horizontal flip, crop-and-resize, color distortion, 
 # random grayscale, and gaussian blur. 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(32),
+    transforms.RandomResizedCrop(224),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
     transforms.RandomGrayscale(p=0.2),
@@ -236,9 +237,10 @@ test_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
-train_dataset = CIFAR10(root=cifar10_root, train=True, transform=ContrastiveTransformations(train_transform, n_views=2))
-another_train_dataset = CIFAR10(root=cifar10_root, train=True, transform=test_transform)
-val_dataset = CIFAR10(root=cifar10_root, train=False, transform=test_transform)
+
+train_dataset = ImageFolder(imagenet_root+'train', ContrastiveTransformations(train_transform, n_views=2))
+another_train_dataset = ImageFolder(imagenet_root+'train', test_transform)
+val_dataset = ImageFolder(imagenet_root+'val', test_transform)
 
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
                           shuffle=True, num_workers=4, pin_memory=True)
@@ -264,7 +266,7 @@ model_parameters = filter(lambda p: p.requires_grad, model.parameters())
 params = sum([np.prod(p.size()) for p in model_parameters])
 print(f"Network instantiated with {params} parameters")
 
-setproctitle.setproctitle('{}_{}_{}'.format("resnet50", "ssl", "cifar10"))
+setproctitle.setproctitle('{}_{}_{}'.format("resnet50", "ssl", "imagenet"))
 
 print(args)
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
@@ -272,7 +274,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["ssl", "cifar10", "rn50", args.conf_timestamp])
+                name = str.join("-",["ssl", "imagenet", "rn18", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -283,7 +285,7 @@ progress_bar = ProgressBar(verbose=not args.non_verbose)
 
 print(file=sys.stderr)
 
-CHKPT_NAME = f'rn50-ssl-cifar10.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'rn50-ssl-imagenet.ckpt' # obtaineed with seed = 11
 
 model.train()
 optimizer, scheduler = setup_optimizerNscheduler(args, model)
