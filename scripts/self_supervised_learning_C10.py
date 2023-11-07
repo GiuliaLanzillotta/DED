@@ -5,7 +5,7 @@ Date: Wed 1st of Nov
 Self-supervised learning script: training a model on Cifar10 data using SimCLR.
 
 
-python scripts/self_supervised_learning_C10.py --seed 11 --gpus_id 6 --batch_size 128  --checkpoints --notes SSL-cifar10-rn50 --wandb_project DataEfficientDistillation
+python scripts/self_supervised_learning_C10.py --seed 11 --gpus_id 5 --batch_size 256  --checkpoints --notes SSL-cifar10-rn50 --wandb_project DataEfficientDistillation
 
 Original paper: https://arxiv.org/pdf/2002.05709.pdf
 
@@ -61,7 +61,7 @@ def test(net, train_data_loader, test_data_loader, t):
     
     test using weighted knn to find the most similar images' label to assign the test image
     """
-    k = 200 # knn parameter
+    k = 20 # knn parameter
     c = 10 # cifar10 classes
     net.eval()
     total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
@@ -108,8 +108,7 @@ def test(net, train_data_loader, test_data_loader, t):
 
 def setup_optimizerNscheduler(args, model, stud=False):
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.optim_wd)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
-                            T_max=args.n_epochs, eta_min=args.lr) # so no reduction applied
+        scheduler = None
         return optimizer, scheduler
 
         
@@ -170,8 +169,8 @@ class Model(nn.Module):
         # encoder
         self.f = nn.Sequential(*self.f)
         # projection head
-        self.g = nn.Sequential(nn.Linear(2048, 128, bias=False), nn.BatchNorm1d(128),
-                               nn.ReLU(inplace=True), nn.Linear(128, feature_dim, bias=True))
+        self.g = nn.Sequential(nn.Linear(2048, 512, bias=False), nn.BatchNorm1d(512),
+                               nn.ReLU(inplace=True), nn.Linear(512, feature_dim, bias=True))
 
     def forward(self, x):
         x = self.f(x)
@@ -218,8 +217,6 @@ if args.seed is not None:
 
 # dataset -> cifar10
 cifar10_root = '../continually/data/'
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
 
 # transformations: Overall, for our experiments, we apply a set of 5 transformations following 
 # the original SimCLR setup: random horizontal flip, crop-and-resize, color distortion, 
@@ -243,7 +240,7 @@ val_dataset = CIFAR10(root=cifar10_root, train=False, transform=test_transform)
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
                           shuffle=True, num_workers=4, pin_memory=True)
 another_train_loader = DataLoader(another_train_dataset, batch_size=args.batch_size, 
-                          shuffle=True, num_workers=4, pin_memory=True)
+                          shuffle=False, num_workers=4, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
                         shuffle=False, num_workers=4, pin_memory=False)
 
@@ -259,7 +256,7 @@ print("Dataset ready.")
 #             nn.ReLU(inplace=True),
 #             nn.Linear(4*512, 512)
 #         )
-model = Model(feature_dim=128)
+model = Model(feature_dim=128) 
 model_parameters = filter(lambda p: p.requires_grad, model.parameters())
 params = sum([np.prod(p.size()) for p in model_parameters])
 print(f"Network instantiated with {params} parameters")
@@ -299,7 +296,6 @@ if args.checkpoints: # resuming training from the last point
                 model.load_state_dict(checkpoint['state_dict'])
                 model.to(device)
                 optimizer.load_state_dict(checkpoint['optimizer'])
-                scheduler.load_state_dict(checkpoint['scheduler'])
                 start_epoch = checkpoint['epoch']
                 val_acc = checkpoint['best_acc']
                 best_acc = val_acc
@@ -316,24 +312,25 @@ for epoch in range(start_epoch, args.n_epochs):
                 if args.debug_mode and i > 3: # only 3 batches in debug mode
                         break
                 inputs, _ = data
-                inputs = torch.cat(inputs, dim=0)
-                inputs = inputs.to(device)
-                features, outputs = model(inputs)
+                input1, input2 = inputs
+                input1 = input1.to(device)
+                input2 = input2.to(device)
+                features1, outputs1 = model(input1)
+                features2, outputs2 = model(input2)
+                outputs = torch.cat([outputs1, outputs2], dim=0)
                 loss = info_nce_loss(outputs, args.temperature)
                 loss.backward()
                 optimizer.step()
 
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(train_loader), epoch, 'SSL', loss.item())
-                avg_loss += loss*(inputs.shape[0]//2)
-                total += (inputs.shape[0]//2)
+                avg_loss += loss*input1.size(0)
+                total += input1.size(0)
 
         test_acc_1, test_acc_5 = test(model, another_train_loader, val_loader, t=args.temperature)
+        model.train()
         val_acc = test_acc_1
         avg_loss = avg_loss/total
-
-        if scheduler is not None:
-                scheduler.step()
         
         
 
@@ -350,13 +347,12 @@ for epoch in range(start_epoch, args.n_epochs):
         'epoch_val_acctop5':test_acc_5}
         wandb.log(df)
 
-        if args.checkpoints and (is_best or epoch==args.n_epochs-1):
+        if args.checkpoints and is_best:
                 save_checkpoint({
-                'epoch': args.n_epochs + 1,
+                'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_acc': val_acc,
-                'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict() if scheduler else None
+                'optimizer' : optimizer.state_dict()
                 }, is_best, filename=CHKPT_NAME)
         
 final_val_acc_D = val_acc

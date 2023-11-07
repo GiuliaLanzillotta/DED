@@ -3,7 +3,7 @@ dividing the GPUs equally between them
 
 example commands: 
 
-python utils/cifar5m_runs.py python scripts/cifar5m.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
+python utils/cifar5m_runs.py python scripts/cifar5m.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
 
 python utils/cifar5m_runs.py python scripts/cifar10_mixed.py --reset_optim --batch_size 128  --checkpoints --notes cifar10-mixeddistillation-all --wandb_project DataEfficientDistillation
 python utils/cifar5m_runs.py python scripts/cifar5m_small.py --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5msmall-distillation --wandb_project DataEfficientDistillation
@@ -18,7 +18,7 @@ import subprocess
 
 
 SEEDS = [11, 13, 21, 33, 55]#,5,138,228,196,118
-BUFFER_SIZES = [600, 1200, 6000, 12000, 24000, 60000, 120000, 600000] 
+BUFFER_SIZES = [60000] 
 #BUFFER_SIZES = [1000, 10000, 20000, 100000, 200000, 400000, 1000000] 
 PROPORTIONS = [0.1, 0.2, 0.4, 0.6, 0.8] # 1200000, 600000, 120000, 60000
 PARALLEL_ORDER = 5
@@ -43,7 +43,7 @@ job_count=0
 
 for b in BUFFER_SIZES:
     for seed in SEEDS:
-        for alpha in [0.0]:
+        for alpha in [0.0,1.0]:
             #for k in K: # for topK distillation
             #for b in N_BLOCKS: # inner block distillation
                 new_argv = copy(sys.argv)

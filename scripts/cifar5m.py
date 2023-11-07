@@ -30,7 +30,7 @@ import time
 
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(internal_path)
-sys.path.append(internal_path + '/datasets')
+sys.path.append(internal_path + '/dataset_utils')
 sys.path.append(internal_path + '/utils')
 
 
@@ -59,7 +59,7 @@ from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
 from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
-from datasets.data_utils import load_dataset
+from dataset_utils.data_utils import load_dataset
 
 try:
     import wandb
@@ -68,6 +68,7 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
 AUGMENT = True
+THRESHOLD = 1e-6
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -332,7 +333,10 @@ optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 results = []
 alpha = args.alpha
-for e in range(args.n_epochs):
+loss_zero = False
+e = 0
+while not loss_zero:
+        e +=1
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
         avg_loss = 0.0
@@ -366,9 +370,9 @@ for e in range(args.n_epochs):
 
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
-                avg_loss += loss
+                avg_loss += loss*(labels.shape[0])
         
-        avg_loss = avg_loss/i
+        avg_loss = avg_loss/total
         if scheduler is not None:
                 scheduler.step()
         
@@ -378,8 +382,10 @@ for e in range(args.n_epochs):
         teacher_student_distance = distance_models(teacher, student)
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
+
         results.append(val_acc)
         is_best = val_acc > best_acc 
+        loss_zero = avg_loss < THRESHOLD
 
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
@@ -392,7 +398,15 @@ for e in range(args.n_epochs):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement}
         wandb.log(df)
-
+        
+        if args.checkpoints and loss_zero: 
+                save_checkpoint({
+                'epoch': e + 1,
+                'state_dict': student.state_dict(),
+                'best_acc': val_acc,
+                'optimizer' : optimizer.state_dict(),
+                'scheduler' : scheduler.state_dict()
+                }, False, filename=f'mnet-student-zero_loss-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
 print("Training completed. Full evaluation and logging...")
 end = time.time()
@@ -401,14 +415,7 @@ experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(student, teacher, val_loader, device)
  
-if args.checkpoints: 
-        save_checkpoint({
-        'epoch': e + 1,
-        'state_dict': student.state_dict(),
-        'best_acc': val_acc,
-        'optimizer' : optimizer.state_dict(),
-        'scheduler' : scheduler.state_dict()
-        }, False, filename=f'mnet-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+
 
 experiment_log['final_val_acc_S'] = val_acc
 experiment_log['final_train_agreement'] = train_agreement
