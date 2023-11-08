@@ -223,7 +223,7 @@ if not args.pretrained:
                 if checkpoint: 
                         teacher.load_state_dict(checkpoint['state_dict'])
                         teacher.to(device)
-                        optimizer.load_state_dict(checkpoint['optimizer'])
+                        #optimizer.load_state_dict(checkpoint['optimizer'])
                         scheduler.load_state_dict(checkpoint['scheduler'])
                         start_epoch = checkpoint['epoch']
                         val_acc = checkpoint['best_acc']

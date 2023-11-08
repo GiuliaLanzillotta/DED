@@ -158,6 +158,45 @@ def validation_agreement_function_distance(student, teacher, val_loader, device,
         return acc, agreement, function_distance
 
 
+def validation_and_L2distance(student, teacher, val_loader, device, num_samples=-1, use_teacher=True):
+        """ Like evaluate, but it also returns the average agreement of student and teacher"""
+        status = student.training
+        student.eval()
+        teacher.eval() # shouldn't be needed
+        if num_samples >0: 
+                # we select a subset of the validation dataset to validate on 
+                # note: a different random sample is used every time
+                random_indices = np.random.choice(range(len(val_loader.dataset)), size=num_samples, replace=False)
+                _subset = Subset(val_loader.dataset, random_indices)
+                val_loader =  DataLoader(_subset, 
+                                        batch_size=val_loader.batch_size, 
+                                        shuffle=False, num_workers=4, pin_memory=False)
+        correct, total, l2distance, hdistance = 0.0, 0.0, 0.0, 0.0
+        for i,data in enumerate(val_loader):
+                with torch.no_grad():
+                        inputs, labels = data
+                        inputs, labels = inputs.to(device), labels.to(device)
+                        outputs_s = student(inputs)
+                        prob_s = F.softmax(outputs_s, dim=1)
+                        if use_teacher: 
+                               outputs_t = teacher(inputs)
+                               prob_t = F.softmax(outputs_t, dim=1)
+                        correct += torch.sum(torch.max(outputs_s.data, 1)[1] == labels).item()
+                        if use_teacher:
+                                l2distance += torch.norm(prob_s-prob_t, dim=1).sum()
+                                hdistance += np.sum(hellinger(prob_s, prob_t))
+                        else: 
+                               labels = F.one_hot(labels, num_classes=outputs_s.size(1)).to(torch.float)
+                               l2distance += torch.norm(prob_s - labels, dim=1).sum()
+                               hdistance += np.sum(hellinger(prob_s, labels))
+                        total += labels.shape[0]
+                                
+        acc=(correct / total) * 100
+        l2distance=l2distance/total
+        hdistance=hdistance/total
+        student.train(status)
+        return acc, l2distance, hdistance
+
 def distance_models(teacher, student):
        """Measuring the distance between the models in parameter space"""
        theta_teacher = parameters_to_vector(teacher.parameters()).detach()
