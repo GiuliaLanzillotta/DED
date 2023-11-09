@@ -91,3 +91,6 @@ class TransformerModel(nn.Module):
 
 
 tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
+dataset = load_dataset("wikitext")
+
+# train on the same dataset as the original network ... 

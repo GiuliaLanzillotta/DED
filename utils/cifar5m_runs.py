@@ -4,11 +4,12 @@ dividing the GPUs equally between them
 example commands: 
 
 python utils/cifar5m_runs.py python scripts/cifar5m.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
-python utils/cifar5m_runs.py python scripts/cifar5m_zeroloss.py --lr 0.001 --optim_adam --MSE --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
+python utils/cifar5m_runs.py python scripts/cifar5m_zeroloss.py  --MSE --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
 python utils/cifar5m_runs.py python scripts/cifar5m_SSL.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-SSL --wandb_project DataEfficientDistillation
 python utils/cifar5m_runs.py python scripts/cifar10_mixed.py --reset_optim --batch_size 128  --checkpoints --notes cifar10-mixeddistillation-all --wandb_project DataEfficientDistillation
 python utils/cifar5m_runs.py python scripts/cifar5m_small.py --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5msmall-distillation --wandb_project DataEfficientDistillation
 python utils/cifar5m_runs.py python scripts/cifar5m_recurrent.py --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5mrecurrent-distillation --wandb_project DataEfficientDistillation
+python utils/cifar5m_runs.py python scripts/cifar5m_2heads.py --beta 0.5 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-2heads --wandb_project DataEfficientDistillation
 
 
 """
@@ -20,10 +21,10 @@ import subprocess
 
 SEEDS = [11, 13, 21, 33, 55]#,5,138,228,196,118
 #BUFFER_SIZES = [60000] 
-BUFFER_SIZES = [10000, 20000, 60000, 100000, 200000, 400000, 1000000] 
+BUFFER_SIZES = [600, 1200, 6000, 12000, 24000, 60000, 120000, 600000]
 PROPORTIONS = [0.1, 0.2, 0.4, 0.6, 0.8] # 1200000, 600000, 120000, 60000
-PARALLEL_ORDER = 4
-GPUIDS = [4,5,6,7]
+PARALLEL_ORDER = 10
+GPUIDS = [0, 1, 2, 3]
 
 def crange(start, end, modulo):
     # implementing circular range
@@ -44,12 +45,12 @@ job_count=0
 
 for b in BUFFER_SIZES:
     for seed in SEEDS:
-        for alpha in [0.0,1.0]:
+        for alpha in [0.0]:
             #for k in K: # for topK distillation
             #for b in N_BLOCKS: # inner block distillation
                 new_argv = copy(sys.argv)
                 new_argv.append(f'--seed {seed} ')
-                new_argv.append(f'--alpha {alpha} ')
+                #new_argv.append(f'--alpha {alpha} ')
                 new_argv.append(f'--buffer_size {b} ')
                 #if alpha==1:
                 #    new_argv.append(f'--teacher_off')

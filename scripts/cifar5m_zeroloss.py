@@ -9,7 +9,7 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 120000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m_zeroloss.py --seed 11 --alpha 1 --gpus_id 4 --buffer_size 60000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -66,48 +66,104 @@ try:
 except ImportError:
     wandb = None
 
-LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
-AUGMENT = False
+LOGITS_MAGNITUDE_TEACHER = 11.77597427368164
+#AUGMENT = False
 THRESHOLD = 1e-5
 
-def setup_optimizerNscheduler(args, model, stud=False):
-        if stud: epochs = args.n_epochs_stud
-        else: epochs = args.n_epochs
-        if not args.optim_adam:
-                optimizer = torch.optim.SGD(model.parameters(), 
-                                lr=args.lr, 
-                                weight_decay=args.optim_wd, 
-                                momentum=args.optim_mom,
-                                nesterov=args.optim_nesterov)
-        else: 
-                optimizer = torch.optim.Adam(model.parameters(), 
-                                             lr = args.lr, 
-                                             weight_decay=args.optim_wd)
-                
-        if not args.optim_cosineanneal: 
-                scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[0], gamma=0.1)
-        else: 
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-5)
 
-        if args.optim_warmup > 0: # initialise warmup scheduler
-                warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
+class Flatten(nn.Module):
+    def forward(self, x): return x.view(x.size(0), x.size(1))
+
+def make_cnn(c, num_classes, use_batch_norm):
+    ''' Returns a 5-layer CNN with width parameter c. '''
+    model= nn.Sequential(
+        # Layer 0
+        nn.Conv2d(3, c, kernel_size=3, stride=1,
+                  padding=1, bias=True),
+        nn.BatchNorm2d(c) if use_batch_norm else nn.Identity(),
+        nn.ReLU(),
+
+        # Layer 1
+        nn.Conv2d(c, c*2, kernel_size=3,
+                  stride=1, padding=1, bias=True),
+        nn.BatchNorm2d(c*2) if use_batch_norm else nn.Identity(),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+
+        # Layer 2
+        nn.Conv2d(c*2, c*4, kernel_size=3,
+                  stride=1, padding=1, bias=True),
+        nn.BatchNorm2d(c*4) if use_batch_norm else nn.Identity(),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+
+        # Layer 3
+        nn.Conv2d(c*4, c*8, kernel_size=3,
+                  stride=1, padding=1, bias=True),
+        nn.BatchNorm2d(c*8) if use_batch_norm else nn.Identity(),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+
+        # Layer 4
+        nn.MaxPool2d(4),
+        Flatten(),
+        nn.Linear(c*8, num_classes, bias=True)
+    )
+    
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    params = sum([np.prod(p.size()) for p in model_parameters])
+    print(f"CNN made with {params} parameters")
+
+    return model
+
+
+def setup_optimizerNscheduler(args, model, stud=False):
+        if stud: 
+               optimizer = torch.optim.SGD(model.parameters(), 
+                                lr=1e-3, 
+                                weight_decay=0.0, 
+                                momentum=0.9,
+                                nesterov=False)
+               warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
+               scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5], gamma=1.0)
+               scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, scheduler], milestones=[5])
+        
+        else: 
+                if not args.optim_adam:
+                        optimizer = torch.optim.SGD(model.parameters(), 
+                                        lr=args.lr, 
+                                        weight_decay=args.optim_wd, 
+                                        momentum=args.optim_mom,
+                                        nesterov=args.optim_nesterov)
+                else: 
+                        optimizer = torch.optim.Adam(model.parameters(), 
+                                                lr = args.lr, 
+                                                weight_decay=args.optim_wd)
+                        
+                if not args.optim_cosineanneal: 
+                        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, 
                                                                      start_factor=0.01, 
                                                                      total_iters=args.optim_warmup)
-                scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, 
-                                                                schedulers=[warmup_scheduler, scheduler], 
-                                                                milestones=[args.optim_warmup])
+                else: 
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs-args.optim_warmup)
+
+                if args.optim_warmup > 0: # initialise warmup scheduler
+                        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.optim_warmup)
+                        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, 
+                                                                        schedulers=[warmup_scheduler, scheduler], 
+                                                                        milestones=[args.optim_warmup])
         return optimizer, scheduler
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + "convnet/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + "convnet/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -123,15 +179,14 @@ def parse_args(buffer=False):
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
-    parser.add_argument('--optim_wd', type=float, default=0, help='optimizer weight decay.')
+    parser.add_argument('--optim_wd', type=float, default=1e-3, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
     parser.add_argument('--optim_mom', type=float, default=0, help='optimizer momentum.')
-    parser.add_argument('--optim_warmup', type=int, default=0, help='Number of warmup epochs.')
+    parser.add_argument('--optim_warmup', type=int, default=5, help='Number of warmup epochs.')
     parser.add_argument('--optim_nesterov', default=False, action='store_true', help='optimizer nesterov momentum.')
-    parser.add_argument('--optim_cosineanneal', default=False, action='store_true', help='Enabling cosine annealing of learning rate..')
+    parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
     parser.add_argument('--n_epochs', type=int, default=30, help='Number of epochs.')
-    parser.add_argument('--n_epochs_stud', type=int, default=30, help='Number of student epochs.')
-    parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
+    parser.add_argument('--batch_size', type=int, default = 128, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
 
@@ -164,18 +219,16 @@ if args.seed is not None:
 # dataset -> cifar100 for the teacher and cifar5m for the student
 #C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
 
-C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
-
-
-print(f"Randomly drawing {60000} samples for the Cifar5M base")
+C5m_train, C5m_test = load_dataset('cifar5m', augment=True)
+print(f"Randomly drawing {100000} samples for the Cifar5M base")
 all_indices = set(range(len(C5m_train)))
-random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
+random_indices = np.random.choice(list(all_indices), size=100000, replace=False)
 teacher_data = Subset(C5m_train, random_indices)
 
 # initialising the model
-teacher = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
+teacher = make_cnn(c=20, num_classes=10, use_batch_norm=False) # adjusting for CIFAR 
 
-setproctitle.setproctitle('{}_{}_{}'.format("mnet", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
+setproctitle.setproctitle('{}_{}_{}'.format("convnet", args.buffer_size if 'buffer_size' in args else 0, "cifar5m"))
 
 # start the training 
 print(args)
@@ -184,7 +237,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "cifar5m", "mnet", args.conf_timestamp])
+                name = str.join("-",["offline", "cifar5m", "convnet", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -205,11 +258,11 @@ val_loader = DataLoader(C5m_test, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'mnet-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'convnet-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
-        optimizer, scheduler = setup_optimizerNscheduler(args, teacher)
+        optimizer, scheduler = setup_optimizerNscheduler(args, teacher, stud=False)
         results = []
         best_acc = 0.
         start_epoch = 0
@@ -292,10 +345,11 @@ else:
 
 df = {'final_val_acc_D':final_val_acc_D}
 wandb.log(df)
-
-
-print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
 teacher.eval() # set the main model to evaluation
+
+
+C5m_train, C5m_test = load_dataset('cifar5m', augment=False)
+print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
 
 random_indices = np.random.choice(list(all_indices), 
                 size=args.buffer_size, replace=False)
@@ -320,18 +374,13 @@ experiment_log['final_val_acc_D'] = final_val_acc_D
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
-
-if args.distributed=='dp': 
-      print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
-      student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
+student = make_cnn(c=20, num_classes=10, use_batch_norm=False) 
 student.to(device)
 student.train()
 
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 
-results = []
 alpha = args.alpha
 loss_zero = False
 e = 0
@@ -417,7 +466,7 @@ while not loss_zero:
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'mnet-student-zero_loss-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'convnet-student-zero_loss-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
 print("Training completed. Full evaluation and logging...")
 end = time.time()
@@ -440,7 +489,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m_zero" + "/" + "mnet" 
+path = base_path() + "results" + "/" + "cifar5m_zero" + "/" + "convnet" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')
