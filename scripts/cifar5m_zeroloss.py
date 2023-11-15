@@ -71,52 +71,6 @@ LOGITS_MAGNITUDE_TEACHER = 11.77597427368164
 THRESHOLD = 1e-5
 
 
-class Flatten(nn.Module):
-    def forward(self, x): return x.view(x.size(0), x.size(1))
-
-def make_cnn(c, num_classes, use_batch_norm):
-    ''' Returns a 5-layer CNN with width parameter c. '''
-    model= nn.Sequential(
-        # Layer 0
-        nn.Conv2d(3, c, kernel_size=3, stride=1,
-                  padding=1, bias=True),
-        nn.BatchNorm2d(c) if use_batch_norm else nn.Identity(),
-        nn.ReLU(),
-
-        # Layer 1
-        nn.Conv2d(c, c*2, kernel_size=3,
-                  stride=1, padding=1, bias=True),
-        nn.BatchNorm2d(c*2) if use_batch_norm else nn.Identity(),
-        nn.ReLU(),
-        nn.MaxPool2d(2),
-
-        # Layer 2
-        nn.Conv2d(c*2, c*4, kernel_size=3,
-                  stride=1, padding=1, bias=True),
-        nn.BatchNorm2d(c*4) if use_batch_norm else nn.Identity(),
-        nn.ReLU(),
-        nn.MaxPool2d(2),
-
-        # Layer 3
-        nn.Conv2d(c*4, c*8, kernel_size=3,
-                  stride=1, padding=1, bias=True),
-        nn.BatchNorm2d(c*8) if use_batch_norm else nn.Identity(),
-        nn.ReLU(),
-        nn.MaxPool2d(2),
-
-        # Layer 4
-        nn.MaxPool2d(4),
-        Flatten(),
-        nn.Linear(c*8, num_classes, bias=True)
-    )
-    
-    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-    params = sum([np.prod(p.size()) for p in model_parameters])
-    print(f"CNN made with {params} parameters")
-
-    return model
-
-
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: 
                optimizer = torch.optim.SGD(model.parameters(), 
@@ -125,7 +79,7 @@ def setup_optimizerNscheduler(args, model, stud=False):
                                 momentum=0.9,
                                 nesterov=False)
                warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=5)
-               scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5], gamma=1.0)
+               scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=4000, eta_min=1e-5)
                scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, scheduler], milestones=[5])
         
         else: 

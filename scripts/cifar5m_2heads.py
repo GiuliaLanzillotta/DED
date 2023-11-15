@@ -9,12 +9,9 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m_2heads.py --seed 11 --beta 0.5  --gpus_id 0 --buffer_size 60000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-2heads --wandb_project DataEfficientDistillation
+python scripts/cifar5m_2heads.py --MSE --seed 11 --beta 0.5  --gpus_id 7 --buffer_size 60000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-2heads --wandb_project DataEfficientDistillation
 
 
-Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
-
-Mobilenets: compact, no-residuals CNNs https://arxiv.org/pdf/1704.04861.pdf 
 
 """
 
@@ -69,30 +66,60 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
 AUGMENT = True
-THRESHOLD = 1e-6
 
 
-class StudentNet(nn.Module):
+class Flatten(nn.Module):
+    def forward(self, x): return x.view(x.size(0), x.size(1))
+
+class TwoHeadsNet(nn.Module):
     # a mobilenet with two heads
-    def __init__(self, num_classes=10, beta=1.0):
+    def __init__(self, num_classes=10, beta=1.0, c=20):
         """ Beta is the mixing factor for the models predictions."""
-        super(StudentNet, self).__init__()
+        super(TwoHeadsNet, self).__init__()
 
-        net = mobilenet_v3_large(num_classes=num_classes) # adjusting for CIFAR 
+        layer1 = nn.Sequential(
+                nn.Conv2d(3, c, kernel_size=3, stride=1,padding=1, bias=True),
+                nn.ReLU())
+        layer2 = nn.Sequential(nn.Conv2d(c, c*2, kernel_size=3, stride=1, padding=1, bias=True),
+                               nn.BatchNorm2d(c*2),
+                               nn.ReLU(),
+                               nn.MaxPool2d(2))
+        layer3 = nn.Sequential(nn.Conv2d(c*2, c*4, kernel_size=3,
+                  stride=1, padding=1, bias=True),
+                nn.BatchNorm2d(c*4),
+                nn.ReLU(),
+                nn.MaxPool2d(2))
+        layer4 = nn.Sequential(nn.Conv2d(c*4, c*8, kernel_size=3,
+                  stride=1, padding=1, bias=True),
+                nn.BatchNorm2d(c*8),
+                nn.ReLU(),
+                nn.MaxPool2d(2))
+        final_layer = nn.Sequential(nn.MaxPool2d(4),
+                        Flatten(),
+                        nn.Linear(c*8, num_classes, bias=True))
 
-        
-        self.f = net.features
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.labels_head = net.classifier
-        self.logits_head = copy.deepcopy(net.classifier)
+        # we divide the backbone from the heads ----------------------
+        self.f = nn.Sequential(layer1, layer2, layer3) 
 
-        self.beta = beta 
+        self.labels_head = nn.Sequential(
+         copy.deepcopy(layer4), copy.deepcopy(final_layer)
+        )
+        self.logits_head = nn.Sequential(
+         copy.deepcopy(layer4), copy.deepcopy(final_layer)
+        )
+
+        self.beta = beta
+
+        model_parameters = filter(lambda p: p.requires_grad, self.parameters())
+        params = sum([np.prod(p.size()) for p in model_parameters])
+        print(f"{'Student'} CNN made with {params} parameters")
+
+        b_params = sum([np.prod(p.size()) for p in self.f.parameters()])
+        print(f"{'Student'} : {b_params} parameters in the backbone")
+
 
     def forward(self, x, mixed=True):
         z = self.f(x)
-        z = self.avgpool(z)
-        z = torch.flatten(z, 1)
-
         labels_out = self.labels_head(z)
         logits_out = self.logits_head(z)
 
@@ -101,7 +128,7 @@ class StudentNet(nn.Module):
         return labels_out, logits_out
 
 
-def validation_2heads(student:StudentNet, val_loader, device, num_samples=-1):
+def validation_2heads(student:TwoHeadsNet, val_loader, device, num_samples=-1):
         """ Like evaluate, but it also returns the average agreement of student and teacher"""
         status = student.training
         student.eval()
@@ -161,14 +188,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + "convnet/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + "convnet/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -234,9 +261,9 @@ random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
 teacher_data = Subset(C5m_train, random_indices)
 
 # initialising the model
-teacher = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
+teacher = make_cnn(c=20, num_classes=10, use_batch_norm=True) # adjusting for CIFAR 
 
-setproctitle.setproctitle('{}_{}_{}'.format("mnet-2heads", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
+setproctitle.setproctitle('{}_{}_{}'.format("convnet-2heads", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
 
 # start the training 
 print(args)
@@ -245,7 +272,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "cifar5m", "mnet-2heads", args.conf_timestamp])
+                name = str.join("-",["cifar5m", "convnet-2heads", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -266,7 +293,7 @@ val_loader = DataLoader(C5m_test, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'mnet-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'convnet-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
@@ -368,26 +395,28 @@ buffer_loader =  DataLoader(student_data,
 
 args = parse_args(buffer=True)
 experiment_log = vars(args)
+experiment_log['backbone_layers'] = 3
 experiment_log['final_val_acc_D'] = final_val_acc_D
 
+wandb.config['backbone_layers']=3
 
 
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = StudentNet(num_classes=10, beta=args.beta)
+student = TwoHeadsNet(num_classes=10, beta=args.beta)
 student.to(device)
 student.train()
 
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 
-loss_zero = False
-
+average_magnitude = 0
+beta=args.beta
 for e in range(args.n_epochs):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
-        avg_loss = 0.0
+        avg_loss, avg_l_loss, avg_d_loss = 0.0, 0.0, 0.0
         best_acc = 0.0
         correct_labels, correct_distil, total, agreement = 0.0, 0.0, 0.0, 0.0
         for i, data in enumerate(buffer_loader):
@@ -414,18 +443,37 @@ for e in range(args.n_epochs):
                       labels_loss = F.mse_loss(out_labels, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER)  # Bobby's correction
                 else:
                       labels_loss = F.cross_entropy(out_labels, labels)
-                loss = 0.5*labels_loss + 0.5*logits_loss
+                loss = beta*labels_loss + (1-beta)*logits_loss
                 loss.backward()
-                optimizer.step()
+                optimizer.step()        
+
+
+                if LOGITS_MAGNITUDE_TEACHER == 1: # estimate during the first epoch
+                       average_non_max = (logits.sum(dim=1) - logits.max(dim=1)[0])/9 # average over the non-max outputs
+                       average_magnitude += (logits.max(dim=1)[0] - average_non_max).sum(dim=0) 
+        
 
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
                 avg_loss += loss*(labels.shape[0])
+                avg_l_loss += labels_loss*(labels.shape[0])
+                avg_d_loss += logits_loss+(labels.shape[0])
+
         
         avg_loss = avg_loss/total
+        avg_l_loss = avg_l_loss/total
+        avg_d_loss = avg_d_loss/total
+
         if scheduler is not None:
                 scheduler.step()
+
+
+        if LOGITS_MAGNITUDE_TEACHER==1: 
+                average_magnitude = average_magnitude/total
+                LOGITS_MAGNITUDE_TEACHER = average_magnitude
+                print(f"Setting LMT to {LOGITS_MAGNITUDE_TEACHER}")
         
+
         train_acc_labels = (correct_labels/total) * 100
         train_acc_distil = (correct_distil/total) * 100
         train_agreement = (agreement/total) * 100      
@@ -433,8 +481,6 @@ for e in range(args.n_epochs):
         val_acc_labels, val_acc_distil = validation_2heads(student, val_loader, device, num_samples=args.validate_subset)
 
         is_best = val_acc_labels > best_acc 
-        loss_zero = avg_loss < THRESHOLD
-
 
         print('\nTrain accuracy (labels) : {} %'.format(round(train_acc_labels, 2)), file=sys.stderr)
         print('\nTrain accuracy (distil) : {} %'.format(round(train_acc_distil, 2)), file=sys.stderr)
@@ -442,6 +488,8 @@ for e in range(args.n_epochs):
         print('\Val accuracy (distil): {} %'.format(round(val_acc_distil, 2)), file=sys.stderr)
         
         df = {'epoch_loss_S':avg_loss,
+              'epoch_labels_loss_S':avg_l_loss,
+              'epoch_distil_loss_S':avg_d_loss,
               'epoch_train_acc_labels_S':train_acc_labels,
               'epoch_train_acc_distil_S':train_acc_distil,
               'epoch_train_agreement':train_agreement,
@@ -449,15 +497,6 @@ for e in range(args.n_epochs):
               'epoch_val_acc_distil_S':val_acc_distil}
         wandb.log(df)
         
-        if args.checkpoints and loss_zero: 
-                save_checkpoint({
-                'epoch': e + 1,
-                'state_dict': student.state_dict(),
-                'best_acc': val_acc_labels,
-                'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
-                }, False, filename=f'mnet-2heads-student-{args.seed}-{args.buffer_size}.ckpt')
-
 end = time.time()
 
 print(f"Training completed in {end-start} s. Full evaluation and logging...")
@@ -480,7 +519,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + "mnet-2heads" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + "convnet-2heads" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')
