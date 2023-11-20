@@ -99,13 +99,13 @@ class TwoHeadsNet(nn.Module):
                         nn.Linear(c*8, num_classes, bias=True))
 
         # we divide the backbone from the heads ----------------------
-        self.f = nn.Sequential(layer1, layer2, layer3) 
+        self.f = nn.Sequential(layer1, layer2) 
 
         self.labels_head = nn.Sequential(
-         copy.deepcopy(layer4), copy.deepcopy(final_layer)
+         copy.deepcopy(layer3), copy.deepcopy(layer4), copy.deepcopy(final_layer)
         )
         self.logits_head = nn.Sequential(
-         copy.deepcopy(layer4), copy.deepcopy(final_layer)
+         copy.deepcopy(layer3), copy.deepcopy(layer4), copy.deepcopy(final_layer)
         )
 
         self.beta = beta
@@ -261,9 +261,9 @@ random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
 teacher_data = Subset(C5m_train, random_indices)
 
 # initialising the model
-teacher = make_cnn(c=20, num_classes=10, use_batch_norm=True) # adjusting for CIFAR 
+teacher = make_cnn(c=40, num_classes=10, use_batch_norm=True) # adjusting for CIFAR 
 
-setproctitle.setproctitle('{}_{}_{}'.format("convnet-2heads", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
+setproctitle.setproctitle('{}_{}_{}'.format("convnet_big-2heads", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
 
 # start the training 
 print(args)
@@ -272,7 +272,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["cifar5m", "convnet-2heads", args.conf_timestamp])
+                name = str.join("-",["cifar5m", "convnet_big-2heads", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -293,7 +293,7 @@ val_loader = DataLoader(C5m_test, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'convnet-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'convnet_big-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
@@ -395,16 +395,17 @@ buffer_loader =  DataLoader(student_data,
 
 args = parse_args(buffer=True)
 experiment_log = vars(args)
-experiment_log['backbone_layers'] = 3
+experiment_log['backbone_layers'] = 2
 experiment_log['final_val_acc_D'] = final_val_acc_D
+experiment_log['network'] = 'convnet_big'
 
-wandb.config['backbone_layers']=3
+wandb.config['backbone_layers']= 2
 
 
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = TwoHeadsNet(num_classes=10, beta=args.beta)
+student = TwoHeadsNet(num_classes=10, beta=args.beta, c=40)
 student.to(device)
 student.train()
 

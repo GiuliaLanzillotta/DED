@@ -6,13 +6,36 @@ Date created: Mon 13.11.23
 
 We use the languini kitchen package (modified ad hog) to train a GPT model with distillation. 
 
+
+Command: 
+
+48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
+
+CUDA_VISIBLE_DEVICES=7 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=12006 scripts/gpt_languini.py mini \
+  --alpha 0 \
+  --train_batch_size 64 \
+  --decay_steps 5000 \
+  --max_train_steps 5000 \
+  --gradient_accumulation_steps 32 \
+  --tokens_per_second 16618 \
+  --log_terminal_every 100 \
+  --eval_every 500 \s
+  --log_grads_every 10000 \
+  --log_ckpt_every 1000 \
+  --seed 11 
 """
 
-
+import datetime
 import os
 import sys
 import torch
 import torch.multiprocessing as mp
+
+
+internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(internal_path)
+sys.path.append(internal_path + '/languini')
+
 
 from languini.train_lib import lm_trainer
 from languini.train_lib import lr_schedules
@@ -26,12 +49,14 @@ from languini.common_lib.parallel_utils import LOCAL_RANK, WORLD_RANK, WORLD_SIZ
 import languini.projects.gpt.configs as configs
 from languini.projects.gpt.model import Model
 
-TEACHER_CONFIG_NAME = "..." #TODO
-
+TEACHER_CONFIG_NAME = "medium"
+EXPERIMENT_NOTE = 'gpt_languini'
 
 def run(config, logger, teacher_config=None):
     c = config
-    if teacher_config is None: teacher_config=c 
+
+    mprint("Inside run printing ...")
+    #if teacher_config is None: teacher_config=c 
     
     mprint(f"{c.n_workers} workers detected. Using DistributedDataParallel. Local rank: {LOCAL_RANK}. Device: {c.device}")
     mprint(f"train batch size per worker/GPU: {c.train_batch_size // WORLD_SIZE}")
@@ -82,13 +107,14 @@ def run(config, logger, teacher_config=None):
         mprint("running on multiple devices ...")
     torch.manual_seed(c.seed)
     model = Model(config=c)
-    #TODO: for now we use a teacher with the same architecture as the student. In principle, we can 
-    # load any teacher architecture here
+    mprint("We are about to load the teacher ...")
     teacher = Model(config=teacher_config)
+    mprint("teacher loaded!")
     if c.compile != "None":
         model = torch.compile(model, mode=c.compile)
     if teacher_config.compile != "None":
         teacher = torch.compile(teacher, mode=teacher_config.compile)
+        mprint("teacher compiled!")
     model = model.to(c.device)
     teacher = teacher.to(c.device) # teacher and student should be on the same device
     device_ids = [LOCAL_RANK] if c.device.type == "cuda" else None # must be None for non-cuda
@@ -96,6 +122,7 @@ def run(config, logger, teacher_config=None):
     teacher = torch.nn.parallel.DistributedDataParallel(teacher, device_ids=device_ids) 
     ## Setup Optimiser
     opt = torch.optim.Adam(model.parameters(), lr=c.max_lr, betas=(0.9, 0.95), eps=1e-08)
+    #opt = torch.optim.SGD(model.parameters(), lr = c.max_lr)
     scheduler = lr_schedules.CosineLR(opt,
                                       warmup_steps=200,
                                       max_lr=c.max_lr,
@@ -132,13 +159,12 @@ def main():
     mprint(f"Loading student config {config_name} and teacher config {TEACHER_CONFIG_NAME}")
 
     # load the config file
-    config = configs.load_config(name=config_name)
+    config = configs.load_config(name=config_name, distil_experiment=True)
     teacher_config = configs.load_config(name=TEACHER_CONFIG_NAME)
-    project_path = os.path.dirname(os.path.abspath(__file__))
+    project_path = os.path.dirname(os.path.abspath('ded'))
     mprint(f"project path: {project_path}")
 
-    assert "checkpoint_path" in teacher_config.keys(), "Please provide a checkpoint for the teacher in the teacher config file."
-    config.teacher_checkpoint_path = teacher_config.checkpoint_path
+    assert "teacher_checkpoint_path" in config.keys(), "Please provide a checkpoint for the teacher in the student config file."
 
     # create parser and add custom args not extracted from the config
     parser = experiment_utils.create_parser_based_on_config(config)
@@ -147,18 +173,27 @@ def main():
     # parse args and make updates to the config
     args = parser.parse_args(sys.argv[2:])
     config = experiment_utils.update_config_given_args(config, args)
+    teacher_config.compile = "default"
     config.project_path = project_path
+    teacher_config.project_path = project_path
     config.device = device
+    teacher_config.device = device 
     
     # Check if the config matches the available hardware
     config = experiment_utils.check_hardware(config, world_size=WORLD_SIZE)
 
     # Generate experiment name based on config
-    configs.add_exp_name(config)
+    #configs.add_exp_name(config)
+    config.wandb_notes = EXPERIMENT_NOTE
+    config.exp_name = "-".join([EXPERIMENT_NOTE,config_name])
+    config.exp_id = str(datetime.datetime.now())
     mprint(f"experiment name: {config.exp_name}")
+
+    mprint(f"World size: {WORLD_SIZE}")
     
     # Create the log folder, backup python files, and backup the hyperparameter config to a file
     logger = experiment_utils.setup_experiment(config)
+
     
     run(config, logger, teacher_config)
 

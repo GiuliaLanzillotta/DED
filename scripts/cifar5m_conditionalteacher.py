@@ -9,7 +9,7 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m_conditionalteacher.py --conditional_teacher --MSE --seed 11 --K 3 --alpha 1 --gpus_id 0 --buffer_size 30000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-convnet-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m_conditionalteacher.py --MSE  --seed 11 --K 3 --alpha 1 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-convnet_big_scaledloss-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -134,13 +134,13 @@ def parse_args(buffer=False):
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
-    parser.add_argument('--optim_wd', type=float, default=1e-3, help='optimizer weight decay.')
+    parser.add_argument('--optim_wd', type=float, default=1e-4, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
     parser.add_argument('--optim_mom', type=float, default=0, help='optimizer momentum.')
     parser.add_argument('--optim_warmup', type=int, default=5, help='Number of warmup epochs.')
     parser.add_argument('--optim_nesterov', default=False, action='store_true', help='optimizer nesterov momentum.')
     parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
-    parser.add_argument('--n_epochs', type=int, default=60, help='Number of epochs.')
+    parser.add_argument('--n_epochs', type=int, default=30, help='Number of epochs.')
     parser.add_argument('--n_epochs_stud', type=int, default=30, help='Number of student epochs.')
     parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
@@ -347,7 +347,7 @@ student.train()
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 
-results = []
+average_magnitude=0
 teacher_predictions_results = {} # dictionary where to store the teacher predictions check results for every batch
 alpha = args.alpha
 for e in range(args.n_epochs_stud):
@@ -370,14 +370,19 @@ for e in range(args.n_epochs_stud):
                 correct += torch.sum(pred == labels).item()
                 agreement += torch.sum(pred == pred_t).item()
                 total += labels.shape[0]
+
+                if LOGITS_MAGNITUDE_TEACHER == 1: # estimate during the first epoch
+                       average_non_max = (logits.sum(dim=1) - logits.max(dim=1)[0])/9 # average over the non-max outputs
+                       average_magnitude += (logits.max(dim=1)[0] - average_non_max).sum(dim=0) 
+                
                 
                 # the distillation loss
-                logits_loss = F.mse_loss(outputs, logits, reduce=False).mean(dim=1)
+                logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 # the labels loss 
                 if args.MSE: 
-                      labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduce=False).mean(dim=1)  # Bobby's correction
+                      labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
                 else:
-                      labels_loss = F.cross_entropy(outputs, labels, reduce=False)
+                      labels_loss = F.cross_entropy(outputs, labels, reduction='none')
                 
                 if args.conditional_teacher:
                         #CORE
@@ -402,6 +407,11 @@ for e in range(args.n_epochs_stud):
         avg_loss = avg_loss/total
         if scheduler is not None:
                 scheduler.step()
+        
+        if LOGITS_MAGNITUDE_TEACHER==1: 
+               average_magnitude = average_magnitude/total
+               LOGITS_MAGNITUDE_TEACHER = average_magnitude
+               print(f"Setting LMT to {LOGITS_MAGNITUDE_TEACHER}")
         
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100      

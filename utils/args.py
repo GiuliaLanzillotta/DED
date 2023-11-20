@@ -15,8 +15,6 @@ def add_experiment_args(parser: ArgumentParser) -> None:
     parser.add_argument('--dataset', type=str, required=True,
                         choices=[],
                         help='Which dataset to perform experiments on.')
-    parser.add_argument('--model', type=str, required=True,
-                        help='Model name.', choices=get_all_models())
 
     parser.add_argument('--lr', type=float, required=True,
                         help='Learning rate.')
