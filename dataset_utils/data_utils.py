@@ -1,6 +1,6 @@
 
 import torchvision.transforms as transforms
-from torchvision.datasets import ImageFolder, CIFAR10
+from torchvision.datasets import ImageFolder, CIFAR10, CIFAR100
 from .cifar5m import Cifar5M, Cifar5MData
 
 
@@ -74,7 +74,23 @@ def load_cifar5m(augment=False):
 
     return train_dataset, val_dataset
 
+def load_cifar100(augment=False):
+    """Loads cifar10 dataset"""
+    cifar100_root = '../continually/data/'
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])
 
+    augmentations = []
+    if augment: augmentations = [transforms.RandomCrop(32),
+                                transforms.RandomHorizontalFlip()]
+
+        
+    train_dataset = CIFAR100(root=cifar100_root, train=True, 
+                        transform=transforms.Compose(augmentations+[transforms.ToTensor(), normalize]))
+    val_dataset = CIFAR100(root=cifar100_root, train=False, 
+                        transform=transforms.Compose([transforms.ToTensor(), normalize]))
+
+    return train_dataset, val_dataset
 
 def load_dataset(name:str, augment=False):
     """Loading the dataset chosen. 
@@ -85,6 +101,9 @@ def load_dataset(name:str, augment=False):
     
     if name=='cifar10':
         return load_cifar10(augment)
+    
+    if name=='cifar100':
+        return load_cifar100(augment)
     
     if name=='cifar5m':
         return load_cifar5m(augment)

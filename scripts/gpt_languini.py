@@ -11,18 +11,19 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=7 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=12006 scripts/gpt_languini.py mini \
-  --alpha 0 \
-  --train_batch_size 64 \
+CUDA_VISIBLE_DEVICES=2,4 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=2 --master_addr=localhost --master_port=12332 scripts/gpt_languini.py medium \
+  --alpha 1 \
+  --train_batch_size 32 \
   --decay_steps 5000 \
   --max_train_steps 5000 \
-  --gradient_accumulation_steps 32 \
+  --gradient_accumulation_steps 16 \
   --tokens_per_second 16618 \
   --log_terminal_every 100 \
-  --eval_every 500 \s
+  --eval_every 100 \
   --log_grads_every 10000 \
-  --log_ckpt_every 1000 \
-  --seed 11 
+  --log_ckpt_every 100000 \
+  --seed 11 \
+
 """
 
 import datetime
@@ -121,8 +122,11 @@ def run(config, logger, teacher_config=None):
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids)  # we always use DDP so loading weights is simpler
     teacher = torch.nn.parallel.DistributedDataParallel(teacher, device_ids=device_ids) 
     ## Setup Optimiser
-    opt = torch.optim.Adam(model.parameters(), lr=c.max_lr, betas=(0.9, 0.95), eps=1e-08)
-    #opt = torch.optim.SGD(model.parameters(), lr = c.max_lr)
+    if not c.sgd:
+        opt = torch.optim.Adam(model.parameters(), lr=c.max_lr, betas=(0.9, 0.95), eps=1e-08)
+    else: 
+        mprint("Using SGD optimizer.")
+        opt = torch.optim.SGD(model.parameters(), lr = c.max_lr, momentum=0.9)
     scheduler = lr_schedules.CosineLR(opt,
                                       warmup_steps=200,
                                       max_lr=c.max_lr,
@@ -184,7 +188,7 @@ def main():
 
     # Generate experiment name based on config
     #configs.add_exp_name(config)
-    config.wandb_notes = EXPERIMENT_NOTE
+    config.wandb_notes = EXPERIMENT_NOTE+"_reverseKL"
     config.exp_name = "-".join([EXPERIMENT_NOTE,config_name])
     config.exp_id = str(datetime.datetime.now())
     mprint(f"experiment name: {config.exp_name}")
