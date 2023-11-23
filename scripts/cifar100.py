@@ -8,7 +8,7 @@ The CIFAR-100 dataset consists of 60000 32x32 colour images in 100 classes, with
 
 example commands: 
 
-python scripts/cifar100.py  --seed 11 --alpha 0 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-convnet100-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar100.py  --seed 11 --alpha 0 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-convnet150-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -68,7 +68,7 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 
 AUGMENT = True
-SIZE = 200
+SIZE = 150
 
 def check_teacher_predictions(teacher_prob, labels, K):
        """ Returns true if the teacher predictions satisfy a 
@@ -81,10 +81,23 @@ def check_teacher_predictions(teacher_prob, labels, K):
                                    for i,topK in enumerate(most_likely)]).to(int)
        return use_teacher
 
-
+# For teacher training we take inspiration from these results
+# https://github.com/weiaicunzai/pytorch-cifar100 
 def setup_optimizerNscheduler(args, model, stud=False):
-        if stud: epochs = args.n_epochs_stud
-        else: epochs = args.n_epochs
+        # if not stud: 
+        #        epochs = args.n_epochs
+        #        optimizer = torch.optim.SGD(model.parameters(), 
+        #                         lr=0.1, 
+        #                         weight_decay=5e-4, 
+        #                         momentum=0.9,
+        #                         nesterov=True)
+        #        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60,120,160], gamma=0.2)
+
+        #        return optimizer, scheduler
+        
+        # student training setting
+
+        epochs = args.n_epochs_stud
         if not args.optim_adam:
                 optimizer = torch.optim.SGD(model.parameters(), 
                                 lr=args.lr, 
@@ -97,7 +110,7 @@ def setup_optimizerNscheduler(args, model, stud=False):
                                              weight_decay=args.optim_wd)
                 
         if not args.optim_cosineanneal: 
-                scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+                scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=60, gamma=0.2)
         else: 
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs-args.optim_warmup)
 
@@ -134,14 +147,14 @@ def parse_args(buffer=False):
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
-    parser.add_argument('--optim_wd', type=float, default=1e-3, help='optimizer weight decay.')
+    parser.add_argument('--optim_wd', type=float, default=1e-4, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
     parser.add_argument('--optim_mom', type=float, default=0, help='optimizer momentum.')
     parser.add_argument('--optim_warmup', type=int, default=5, help='Number of warmup epochs.')
     parser.add_argument('--optim_nesterov', default=False, action='store_true', help='optimizer nesterov momentum.')
     parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
-    parser.add_argument('--n_epochs', type=int, default=30, help='Number of epochs.')
-    parser.add_argument('--n_epochs_stud', type=int, default=30, help='Number of student epochs.')
+    parser.add_argument('--n_epochs', type=int, default=60, help='Number of epochs.')
+    parser.add_argument('--n_epochs_stud', type=int, default=60, help='Number of student epochs.')
     parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
@@ -178,7 +191,7 @@ if args.seed is not None:
 C100_train, C100_val = load_dataset('cifar100', augment=AUGMENT)
 
 # initialising the model
-teacher = make_cnn(c=100, num_classes=100, use_batch_norm=True)
+teacher = make_cnn(c=SIZE, num_classes=100, use_batch_norm=True)
 
 setproctitle.setproctitle('{}_{}_{}'.format(f"convnet{SIZE}", args.buffer_size if 'buffer_size' in args else 0, "cifar100"))
 
@@ -189,7 +202,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["cifar100", "convnet{SIZE}", args.conf_timestamp])
+                name = str.join("-",["cifar100", f"convnet{SIZE}", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -323,7 +336,7 @@ experiment_log['final_val_acc_D'] = final_val_acc_D
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = make_cnn(c=100, num_classes=100, use_batch_norm=True)
+student = make_cnn(c=SIZE, num_classes=100, use_batch_norm=True)
 
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")

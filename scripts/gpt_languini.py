@@ -11,18 +11,18 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=2,4 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=2 --master_addr=localhost --master_port=12332 scripts/gpt_languini.py medium \
+CUDA_VISIBLE_DEVICES=2,1 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=2 --master_addr=localhost --master_port=23351 scripts/gpt_languini.py mini2 \
   --alpha 1 \
-  --train_batch_size 32 \
-  --decay_steps 5000 \
-  --max_train_steps 5000 \
+  --train_batch_size 64 \
+  --decay_steps 45000 \
+  --max_train_steps 45000 \
   --gradient_accumulation_steps 16 \
   --tokens_per_second 16618 \
   --log_terminal_every 100 \
   --eval_every 100 \
-  --log_grads_every 10000 \
-  --log_ckpt_every 100000 \
-  --seed 11 \
+  --log_grads_every 100000 \
+  --log_ckpt_every 20000 \
+  --seed 33 \
 
 """
 
