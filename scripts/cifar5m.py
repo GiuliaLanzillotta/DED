@@ -9,7 +9,7 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m.py --seed 11 --alpha 1 --gpus_id 0 --buffer_size 120000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m.py --C 20 --seed 11 --alpha 1 --gpus_id 0 --buffer_size 120000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -58,7 +58,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
+from utils.eval import evaluate, evaluate_CKA_teacher, validation_and_agreement, distance_models, validation_agreement_function_distance
 from dataset_utils.data_utils import load_dataset
 
 try:
@@ -68,7 +68,7 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
 AUGMENT = True
-THRESHOLD = 1e-6
+NETWORK = 'CNN'
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -100,14 +100,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + f"{NETWORK}/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + "mnet/"
+    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + f"{NETWORK}/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -122,6 +122,7 @@ def parse_args(buffer=False):
     parser.add_argument('--distributed', type=str, default='no', choices=['no', 'dp', 'ddp'])
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
+    parser.add_argument('--checkpoints_stud', action='store_true', help='Storing a checkpoint for the student.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
     parser.add_argument('--optim_wd', type=float, default=1e-3, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
@@ -134,6 +135,8 @@ def parse_args(buffer=False):
     parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
+    parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+
 
     add_management_args(parser)
     add_rehearsal_args(parser)
@@ -145,7 +148,7 @@ def parse_args(buffer=False):
     parser.add_argument('--distillation_type', type=str, default='vanilla', choices=['vanilla', 'topK', 'inner', 'inner-parallel', 'topbottomK','randomK'],
                         help='Selects the distillation type, which determines the distillation loss.')
     parser.add_argument('--K', type=int, default=100, help='Number of activations to look at for *topK* distillation loss.')
-    parser.add_argument('--N_BLOCKS', type=int, default=1, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
+    parser.add_argument('--C', type=int, default=20, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
     parser.add_argument('--gamma', type=float, default=1.0, help='The mixing weight for mixed inner distillation')
     args = parser.parse_args()
 
@@ -171,11 +174,14 @@ print(f"Randomly drawing {60000} samples for the Cifar5M base")
 all_indices = set(range(len(C5m_train)))
 random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
 teacher_data = Subset(C5m_train, random_indices)
+C = args.C
 
 # initialising the model
-teacher = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
+teacher = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
+model_size = count_parameters(teacher)
+print(f"Teacher {NETWORK} created with {model_size} parameters.")
 
-setproctitle.setproctitle('{}_{}_{}'.format("mnet", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
+setproctitle.setproctitle('{}_{}_{}'.format(f"{NETWORK}", args.buffer_size if 'buffer_size' in args else 0, "cifar5m"))
 
 # start the training 
 print(args)
@@ -184,7 +190,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "cifar5m", "mnet", args.conf_timestamp])
+                name = str.join("-",["offline", "cifar5m", f"{NETWORK}", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -205,7 +211,7 @@ val_loader = DataLoader(C5m_test, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'mnet-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'{NETWORK}-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
@@ -303,8 +309,8 @@ random_indices = np.random.choice(list(all_indices),
 student_data = Subset(C5m_train, random_indices)
 buffer_loader =  DataLoader(student_data, 
                             batch_size=args.batch_size, 
-                            shuffle=True, 
-                            num_workers=2,  
+                            shuffle=False, 
+                            num_workers=4,  
                             pin_memory=False)
 #NOTE we keep the val loader of C100 for comparison
 # val_loader = DataLoader(C5m_test, batch_size=args.batch_size, 
@@ -314,13 +320,15 @@ buffer_loader =  DataLoader(student_data,
 args = parse_args(buffer=True)
 experiment_log = vars(args)
 experiment_log['final_val_acc_D'] = final_val_acc_D
+experiment_log['network'] = NETWORK
+experiment_log['C'] = C
 
 
 
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = mobilenet_v3_large(num_classes=10) # adjusting for CIFAR 
+student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
 
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
@@ -331,12 +339,11 @@ student.train()
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 
-results = []
+average_magnitude=0
 alpha = args.alpha
 loss_zero = False
-e = 0
-while not loss_zero:
-        e +=1
+T = args.temperature
+for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
         avg_loss = 0.0
@@ -356,15 +363,20 @@ while not loss_zero:
                 correct += torch.sum(pred == labels).item()
                 agreement += torch.sum(pred == pred_t).item()
                 total += labels.shape[0]
+
+                if LOGITS_MAGNITUDE_TEACHER == 1 and alpha>0: # estimate during the first epoch
+                       average_non_max = (logits.sum(dim=1) - logits.max(dim=1)[0])/9 # average over the non-max outputs
+                       average_magnitude += (logits.max(dim=1)[0] - average_non_max).sum(dim=0) 
                 
-                # the distillation loss
-                logits_loss = vanilla_distillation(outputs, logits)
-                # the labels loss 
+                
                 if args.MSE: 
-                      labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER)  # Bobby's correction
+                       labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=100).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
+                       logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 else:
-                      labels_loss = F.cross_entropy(outputs, labels)
-                loss = alpha*labels_loss + (1-alpha)*logits_loss
+                      labels_loss = F.cross_entropy(outputs, labels, reduction='none')
+                      logits_loss = F.kl_div(input=F.log_softmax(outputs/T), target=F.softmax(logits/T), log_target=False, reduction='none').sum(dim=1) * (T**2) # temperature rescaling (for gradients)
+                
+                loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
                 loss.backward()
                 optimizer.step()
 
@@ -376,17 +388,19 @@ while not loss_zero:
         if scheduler is not None:
                 scheduler.step()
         
+        if LOGITS_MAGNITUDE_TEACHER==1: 
+               average_magnitude = average_magnitude/total
+               LOGITS_MAGNITUDE_TEACHER = average_magnitude
+               print(f"Setting LMT to {LOGITS_MAGNITUDE_TEACHER}")
+        
+        
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100      
         # measure distance in parameter space between the teacher and student models 
         teacher_student_distance = distance_models(teacher, student)
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
-
-        results.append(val_acc)
-        is_best = val_acc > best_acc 
-        loss_zero = avg_loss < THRESHOLD
-
+        cka = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=10)
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
@@ -396,26 +410,37 @@ while not loss_zero:
               'epoch_train_agreement':train_agreement,
               'epoch_distance_teacher_student':teacher_student_distance,
               'epoch_val_acc_S':val_acc,
-              'epoch_val_agreement':val_agreement}
+              'epoch_val_agreement':val_agreement,
+              'epoch_cka_train':cka}
         wandb.log(df)
         
-        if args.checkpoints and loss_zero: 
+
+print("Training completed. Full evaluation and logging...")
+end = time.time()
+
+if args.checkpoints_stud: 
                 save_checkpoint({
                 'epoch': e + 1,
                 'state_dict': student.state_dict(),
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'mnet-student-zero_loss-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'{NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
-print("Training completed. Full evaluation and logging...")
-end = time.time()
+
+cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
+cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
+
 
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
+experiment_log['final_cka_train'] = cka_train
+experiment_log['final_cka_val'] = cka_val
+experiment_log['network'] = f'{NETWORK}'
+
+
 val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(student, teacher, val_loader, device)
  
-
 
 experiment_log['final_val_acc_S'] = val_acc
 experiment_log['final_train_agreement'] = train_agreement
@@ -429,7 +454,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + "mnet" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{NETWORK}" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

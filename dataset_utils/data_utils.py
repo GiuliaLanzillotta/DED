@@ -2,7 +2,27 @@
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder, CIFAR10, CIFAR100
 from .cifar5m import Cifar5M, Cifar5MData
+import numpy as np
 
+
+def CIFAR100sparse2coarse(targets):
+    """Convert Pytorch CIFAR100 sparse targets to coarse targets.
+
+    Usage:
+        trainset = torchvision.datasets.CIFAR100(path)
+        trainset.targets = sparse2coarse(trainset.targets)
+    """
+    coarse_labels = np.array([ 4,  1, 14,  8,  0,  6,  7,  7, 18,  3,  
+                               3, 14,  9, 18,  7, 11,  3,  9,  7, 11,
+                               6, 11,  5, 10,  7,  6, 13, 15,  3, 15,  
+                               0, 11,  1, 10, 12, 14, 16,  9, 11,  5, 
+                               5, 19,  8,  8, 15, 13, 14, 17, 18, 10, 
+                               16, 4, 17,  4,  2,  0, 17,  4, 18, 17, 
+                               10, 3,  2, 12, 12, 16, 12,  1,  9, 19,  
+                               2, 10,  0,  1, 16, 12,  9, 13, 15, 13, 
+                              16, 19,  2,  4,  6, 19,  5,  5,  8, 19, 
+                              18,  1,  2, 15,  6,  0, 17,  8, 14, 13])
+    return coarse_labels[targets]
 
 def load_imagenet(augment=False):
     """Loads imagenet dataset"""
@@ -75,15 +95,21 @@ def load_cifar5m(augment=False):
     return train_dataset, val_dataset
 
 def load_cifar100(augment=False):
-    """Loads cifar10 dataset"""
+    """Loads cifar100 dataset"""
+    # statistics source: https://github.com/weiaicunzai/pytorch-cifar100/blob/master/conf/global_settings.py 
+    CIFAR100_TRAIN_MEAN = (0.5070751592371323, 0.48654887331495095, 0.4409178433670343)
+    CIFAR100_TRAIN_STD = (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)
     cifar100_root = '../continually/data/'
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])
+    normalize = transforms.Normalize(mean=CIFAR100_TRAIN_MEAN,
+                                    std=CIFAR100_TRAIN_STD)
 
     augmentations = []
-    if augment: augmentations = [transforms.RandomCrop(32),
-                                transforms.RandomHorizontalFlip()]
-
+    if augment: augmentations =  [
+                    #transforms.ToPILImage(),
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.RandomRotation(15)
+                ]
         
     train_dataset = CIFAR100(root=cifar100_root, train=True, 
                         transform=transforms.Compose(augmentations+[transforms.ToTensor(), normalize]))

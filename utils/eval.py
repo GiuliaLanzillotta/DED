@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils import parameters_to_vector
 
+from utils.kernels import *
 
 def hellinger(p, q):
         """ The Hellinger distance is a bounded metric on the space of 
@@ -91,6 +92,7 @@ def evaluate(model, val_loader, device, num_samples=-1):
     acc=(correct / total) * 100
     model.train(status)
     return acc
+
 
 def validation_and_agreement(student, teacher, val_loader, device, num_samples=-1):
         """ Like evaluate, but it also returns the average agreement of student and teacher"""
@@ -203,3 +205,15 @@ def distance_models(teacher, student):
        theta_student = parameters_to_vector(student.parameters()).detach()
        return torch.norm(theta_teacher-theta_student).item()
 
+
+def evaluate_CKA_teacher(teacher, student, loader, device, batches=10):
+       """ evaluates CKA between teacher and student on the features (second to last layer)"""
+        
+       print("Evaluating CKA ... ") 
+       KT = compute_empirical_kernel(loader, teacher, device, batches)
+       KS = compute_empirical_kernel(loader, student, device, batches)
+
+       CKA = centered_kernal_alignment(KT,KS)
+
+       return CKA
+       

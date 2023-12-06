@@ -8,10 +8,10 @@ The CIFAR-100 dataset consists of 60000 32x32 colour images in 100 classes, with
 
 example commands: 
 
-python scripts/cifar100.py  --seed 11 --alpha 0 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-convnet150-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar100.py  --seed 13 --alpha 0 --gpus_id 3 --temperature 10 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
 
 
-Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
+Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
 
 We here experiment with a paradigm of using the teacher 'on-demand', i.e. 
 when the teacher is good enough according to some pre-defined metric. 
@@ -47,7 +47,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import ImageNet, ImageFolder, CIFAR10
-from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, resnet18, googlenet, efficientnet_b0, mobilenet_v3_large
+from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, googlenet, efficientnet_b0, mobilenet_v3_large
 import torchvision.transforms as transforms
 from torch.nn.utils import parameters_to_vector
 
@@ -58,7 +58,8 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
+from utils.optim import *
+from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance, evaluate_CKA_teacher
 from dataset_utils.data_utils import load_dataset
 
 try:
@@ -83,19 +84,19 @@ def check_teacher_predictions(teacher_prob, labels, K):
 
 # For teacher training we take inspiration from these results
 # https://github.com/weiaicunzai/pytorch-cifar100 
-def setup_optimizerNscheduler(args, model, stud=False):
-        # if not stud: 
-        #        epochs = args.n_epochs
-        #        optimizer = torch.optim.SGD(model.parameters(), 
-        #                         lr=0.1, 
-        #                         weight_decay=5e-4, 
-        #                         momentum=0.9,
-        #                         nesterov=True)
-        #        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60,120,160], gamma=0.2)
-
-        #        return optimizer, scheduler
+def setup_optimizerNscheduler(args, model, stud=False, iter_per_epoch=None):
+        """Iteer_per_epoch is a necessary argument for the teacher optimizer"""
+        if True: 
+               optimizer = torch.optim.SGD(model.parameters(), 
+                                lr=0.1, 
+                                weight_decay=5e-4, 
+                                momentum=0.9,
+                                nesterov=False)
+               scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60,120,160], gamma=0.2)
+               warmup_scheduler = WarmUpLR(optimizer, total_iters=iter_per_epoch * 1)
+               return optimizer, scheduler, warmup_scheduler
         
-        # student training setting
+        #student training setting
 
         epochs = args.n_epochs_stud
         if not args.optim_adam:
@@ -124,14 +125,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         return optimizer, scheduler
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar100" + "/" + "convnet/"
+    path = base_path() + "/chkpts" + "/" + "cifar100" + "/" + "resnet18/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar100" + "/" + "convnet/"
+    path = base_path() + "chkpts" + "/" + "cifar100" + "/" + "resnet18/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -146,6 +147,7 @@ def parse_args(buffer=False):
     parser.add_argument('--distributed', type=str, default='no', choices=['no', 'dp', 'ddp'])
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
+    parser.add_argument('--checkpoints_stud', action='store_true', help='Storing a checkpoint for the student.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
     parser.add_argument('--optim_wd', type=float, default=1e-4, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
@@ -153,11 +155,12 @@ def parse_args(buffer=False):
     parser.add_argument('--optim_warmup', type=int, default=5, help='Number of warmup epochs.')
     parser.add_argument('--optim_nesterov', default=False, action='store_true', help='optimizer nesterov momentum.')
     parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
-    parser.add_argument('--n_epochs', type=int, default=60, help='Number of epochs.')
-    parser.add_argument('--n_epochs_stud', type=int, default=60, help='Number of student epochs.')
+    parser.add_argument('--n_epochs', type=int, default=200, help='Number of epochs.')
+    parser.add_argument('--n_epochs_stud', type=int, default=200, help='Number of student epochs.')
     parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
+    parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
 
     add_management_args(parser)
     add_rehearsal_args(parser)
@@ -191,9 +194,12 @@ if args.seed is not None:
 C100_train, C100_val = load_dataset('cifar100', augment=AUGMENT)
 
 # initialising the model
-teacher = make_cnn(c=SIZE, num_classes=100, use_batch_norm=True)
+teacher = resnet18(num_classes=100)
 
-setproctitle.setproctitle('{}_{}_{}'.format(f"convnet{SIZE}", args.buffer_size if 'buffer_size' in args else 0, "cifar100"))
+params = count_parameters(teacher)
+print(f"Teacher created with {params} parameters")
+
+setproctitle.setproctitle('{}_{}_{}'.format(f"resnet18", args.buffer_size if 'buffer_size' in args else 0, "cifar100"))
 
 # start the training 
 print(args)
@@ -202,7 +208,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["cifar100", f"convnet{SIZE}", args.conf_timestamp])
+                name = str.join("-",["cifar100", f"resnet18", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -223,11 +229,11 @@ val_loader = DataLoader(C100_val, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'convnet{SIZE}-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'resnet18-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
-        optimizer, scheduler = setup_optimizerNscheduler(args, teacher)
+        optimizer, scheduler, warmup_scheduler = setup_optimizerNscheduler(args, teacher, stud=False, iter_per_epoch=len(train_loader))
         results = []
         best_acc = 0.
         start_epoch = 0
@@ -274,6 +280,9 @@ if not args.pretrained:
                         progress_bar.prog(i, len(train_loader), epoch, 'Teacher', loss.item())
                         avg_loss += loss
                         total += labels.shape[0]
+
+                        if epoch==0: # warming up within the epoch 
+                               warmup_scheduler.step()
 
                 if scheduler is not None:
                         scheduler.step()
@@ -323,7 +332,7 @@ random_indices = np.random.choice(list(range(len(C100_train))), size=args.buffer
 student_data = Subset(C100_train, random_indices)
 buffer_loader =  DataLoader(student_data, 
                             batch_size=args.batch_size, 
-                            shuffle=True, 
+                            shuffle=False, #fixing the data loader to keep the epoch order (so we can do cka) 
                             num_workers=4,  
                             pin_memory=False)
 
@@ -336,7 +345,7 @@ experiment_log['final_val_acc_D'] = final_val_acc_D
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = make_cnn(c=SIZE, num_classes=100, use_batch_norm=True)
+student = resnet18(num_classes=100)
 
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
@@ -344,12 +353,13 @@ if args.distributed=='dp':
 student.to(device)
 student.train()
 
-optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
+optimizer, scheduler, warmup_scheduler = setup_optimizerNscheduler(args, student, stud=True, iter_per_epoch=len(buffer_loader))
 
 
 average_magnitude=0
 teacher_predictions_results = {} # dictionary where to store the teacher predictions check results for every batch
 alpha = args.alpha
+T = args.temperature
 for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
@@ -381,7 +391,7 @@ for e in range(args.n_epochs_stud):
                        logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 else:
                       labels_loss = F.cross_entropy(outputs, labels, reduction='none')
-                      logits_loss = F.kl_div(input=F.log_softmax(outputs), target=F.softmax(logits), log_target=False, reduction='none').sum(dim=1)
+                      logits_loss = F.kl_div(input=F.log_softmax(outputs/T, dim=1), target=F.softmax(logits/T, dim=1), log_target=False, reduction='none').sum(dim=1) * (T**2) # temperature rescaling (for gradients)
                 
                 if args.conditional_teacher:
                         #CORE
@@ -402,6 +412,8 @@ for e in range(args.n_epochs_stud):
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
                 avg_loss += loss*(labels.shape[0])
+
+                if e==0: warmup_scheduler.step()
         
         avg_loss = avg_loss/total
         if scheduler is not None:
@@ -418,6 +430,8 @@ for e in range(args.n_epochs_stud):
         teacher_student_distance = distance_models(teacher, student)
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
+        
+        cka = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=10)
 
         results.append(val_acc)
         is_best = val_acc > best_acc 
@@ -431,25 +445,31 @@ for e in range(args.n_epochs_stud):
               'epoch_train_agreement':train_agreement,
               'epoch_distance_teacher_student':teacher_student_distance,
               'epoch_val_acc_S':val_acc,
-              'epoch_val_agreement':val_agreement}
+              'epoch_val_agreement':val_agreement,
+              'epoch_cka_train':cka}
         wandb.log(df)
         
 print("Training completed. Full evaluation and logging...")
 end = time.time()
 
-if args.checkpoints: 
+if args.checkpoints_stud: 
                 save_checkpoint({
                 'epoch': e + 1,
                 'state_dict': student.state_dict(),
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'convnet{SIZE}-student-zero_loss-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'resnet18-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
+cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
+cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
 
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
-experiment_log['network'] = f'convnet{SIZE}'
+experiment_log['final_cka_train'] = cka_train
+experiment_log['final_cka_val'] = cka_val
+
+experiment_log['network'] = f'resnet18'
 val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(student, teacher, val_loader, device)
  
 experiment_log['final_val_acc_S'] = val_acc
@@ -464,7 +484,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar100" + "/" + f"convnet" 
+path = base_path() + "results" + "/" + "cifar100" + "/" + f"resnet18" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

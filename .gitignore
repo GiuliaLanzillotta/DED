@@ -92,4 +92,3 @@ cython_debug/
 wandb
 logs
 languini-kitchen
-languini
