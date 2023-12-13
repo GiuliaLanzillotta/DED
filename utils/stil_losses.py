@@ -8,6 +8,7 @@ from torchvision.datasets import ImageNet, ImageFolder
 from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, resnet18
 import torchvision.transforms as transforms
 from utils.nets import DictionaryNet
+from utils.kernels import centered_kernal_alignment
 
 
 
@@ -67,6 +68,40 @@ def mixed_inner_distillation_free(student_activations, teacher_activations, gamm
     l, c = kernel_inner_distillation_free(student_activations, teacher_activations)
     return (l*c*gamma + l_fc)/(c+1), c+1
 
+def fkd(A_s, A_t, lamda_fr, lamda_fk):
+    """ Feature kernel distillation between student and teacher. 
+        - A_s: BxDs matrix with student features
+        - A_t: BxDt matrix with teacher features """
+    B = A_s.size(0)
+    assert A_t.size(0) == B, "The same number of samples must be provided from teacher and student"
+    # normalising first 
+    features_norm = A_s.norm(dim=1).view(B,1)
+    A_s = torch.div(A_s, features_norm)
+    with torch.no_grad():
+        A_t = torch.div(A_t, A_t.norm(dim=1).view(B,1))
+    # computing kernels 
+    with torch.no_grad():
+        ker_t = torch.matmul(A_t, A_t.T)
+    ker_s = torch.matmul(A_s, A_s.T)
+
+    kernel_loss = ((ker_t - ker_s)**2).sum()/(B*(B-1))
+    features_regulariser = features_norm.mean()
+    loss = lamda_fk*kernel_loss + lamda_fr*features_regulariser
+    return loss, kernel_loss, features_regulariser
+
+def cka_loss(A_s, A_t):
+    """ Feature kernel distillation between student and teacher. 
+        - A_s: BxDs matrix with student features
+        - A_t: BxDt matrix with teacher features """
+    B = A_s.size(0)
+    assert A_t.size(0) == B, "The same number of samples must be provided from teacher and student"
+    
+    with torch.no_grad():
+        ker_t = torch.matmul(A_t, A_t.T)
+    ker_s = torch.matmul(A_s, A_s.T)
+
+    loss = 1 - centered_kernal_alignment(ker_s, ker_t)
+    return loss
 
 def kernel_inner_distillation_free(student_activations, teacher_activations):
     """ Distillation comparing the feature kernels of the layers recorded. """

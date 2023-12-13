@@ -51,6 +51,8 @@ def add_management_args(parser: ArgumentParser) -> None:
     parser.add_argument('--ignore_other_metrics', default=0, choices=[0, 1], type=int,
                         help='disable additional metrics')
     parser.add_argument('--debug_mode', type=int, default=0, help='Run only a few forward steps per epoch')
+    parser.add_argument('--test_mode', type=int, default=0, help='Run only a few forward steps per epoch')
+
     parser.add_argument('--nowand', default=0, choices=[0, 1], type=int, help='Inhibit wandb logging')
     #TODO 
     parser.add_argument('--wandb_entity', type=str, default='continually', help='Wandb entity')

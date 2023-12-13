@@ -9,16 +9,17 @@ from utils.status import ProgressBar
 def HSIC(K,L):
     """Computes Hilbert-Schmidt Independence Criterion of matrices K and L"""
     n = K.shape[0]
-    H = np.eye(n) - np.ones((n,n))/n 
-    KH = np.matmul(K,H)
-    LH = np.matmul(L,H)
-    HSIC = np.trace(np.matmul(KH,LH))/(n-1)**2
+    H = torch.eye(n) - torch.ones((n,n))/n 
+    H = H.to(K.device)
+    KH = torch.matmul(K,H)
+    LH = torch.matmul(L,H)
+    HSIC = torch.trace(torch.matmul(KH,LH))/(n-1)**2
     return HSIC
 
 def centered_kernal_alignment(K,L):
     """ computes CKA index based on two empirical Kernel matrices.
     See https://arxiv.org/pdf/1905.00414.pdf for more info."""
-    CKA = HSIC(K,L) / np.sqrt(HSIC(K,K)*HSIC(L,L))
+    CKA = HSIC(K,L) / torch.sqrt(HSIC(K,K)*HSIC(L,L))
     return CKA
 
 
@@ -47,7 +48,7 @@ def compute_empirical_kernel(data_loader, model, device, num_batches=100):
         progress_bar.prog(i, len(data_loader), -1, 'Collecting features', i/(min(len(data_loader),num_batches)))  
     
     F = phi.size(1) # feature dimensionality
-    features = torch.vstack(features).view(total, F).cpu().numpy()
+    features = torch.vstack(features).view(total, F)
 
-    kernel_matrix = np.matmul(features, features.T)
+    kernel_matrix = torch.matmul(features, features.T)
     return kernel_matrix

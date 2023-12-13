@@ -9,7 +9,8 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m.py --C 20 --seed 11 --alpha 1 --gpus_id 0 --buffer_size 120000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar5m.py --seed 11 --asymmetric_temperature --temperature 0.1 --alpha 0 --gpus_id 1 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18-AT --wandb_project DataEfficientDistillation
+python scripts/cifar5m.py --seed 11 --fkd --alpha 0.003 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18 --wandb_project DataEfficientDistillation
 
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -47,7 +48,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import ImageNet, ImageFolder, CIFAR10
-from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, resnet18, googlenet, efficientnet_b0, mobilenet_v3_large
+from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, googlenet, efficientnet_b0, mobilenet_v3_large
 import torchvision.transforms as transforms
 from torch.nn.utils import parameters_to_vector
 
@@ -66,9 +67,9 @@ try:
 except ImportError:
     wandb = None
 
-LOGITS_MAGNITUDE_TEACHER = 1.0 #TODO
+LOGITS_MAGNITUDE_TEACHER = 1.0 
 AUGMENT = True
-NETWORK = 'CNN'
+NETWORK = 'resnet18'
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -136,6 +137,8 @@ def parse_args(buffer=False):
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+    parser.add_argument('--asymmetric_temperature', action='store_true', help='Temperature is only added to the teacher distribution.')
+    parser.add_argument('--fkd', action='store_true', help='Switching to feature kernel distillation.')
 
 
     add_management_args(parser)
@@ -177,7 +180,8 @@ teacher_data = Subset(C5m_train, random_indices)
 C = args.C
 
 # initialising the model
-teacher = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
+#teacher = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
+teacher = resnet18(num_classes=10)
 model_size = count_parameters(teacher)
 print(f"Teacher {NETWORK} created with {model_size} parameters.")
 
@@ -328,8 +332,8 @@ experiment_log['C'] = C
 print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
-student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
-
+#student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
+student=resnet18(num_classes=10)
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
       student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
@@ -358,6 +362,11 @@ for e in range(args.n_epochs_stud):
                 with torch.no_grad(): logits = teacher(inputs)
                 optimizer.zero_grad()
                 outputs = student(inputs)
+
+                if args.fkd: 
+                       phi_s = student.get_features(inputs)
+                       phi_t = teacher.get_features(inputs)
+
                 _, pred = torch.max(outputs.data, 1)
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()
@@ -370,13 +379,26 @@ for e in range(args.n_epochs_stud):
                 
                 
                 if args.MSE: 
-                       labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=100).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
+                       labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
                        logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 else:
+                      teacher_p = F.softmax(logits/T)
+                      if args.asymmetric_temperature:
+                             student_p = F.log_softmax(outputs)
+                             scaling_factor = 1
+                      else: 
+                             student_p=F.log_softmax(outputs/T)
+                             scaling_factor = T**2
+                             
                       labels_loss = F.cross_entropy(outputs, labels, reduction='none')
-                      logits_loss = F.kl_div(input=F.log_softmax(outputs/T), target=F.softmax(logits/T), log_target=False, reduction='none').sum(dim=1) * (T**2) # temperature rescaling (for gradients)
+                      logits_loss = F.kl_div(input=student_p, target=teacher_p, log_target=False, reduction='none').sum(dim=1) * scaling_factor # temperature rescaling (for gradients)
                 
-                loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
+                if args.fkd: 
+                       features_loss, kernel_loss, features_norm = fkd(phi_s, phi_t, lamda_fk=1, lamda_fr=0.03)
+                       loss = alpha*labels_loss.mean() + (1-alpha)*features_loss
+
+                else: loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
+
                 loss.backward()
                 optimizer.step()
 
@@ -412,6 +434,11 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka}
+        
+        if args.fkd: 
+               df['kernel_loss'] = kernel_loss
+               df['features_norm'] = features_norm
+
         wandb.log(df)
         
 

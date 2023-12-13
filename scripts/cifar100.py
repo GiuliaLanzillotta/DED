@@ -9,6 +9,7 @@ The CIFAR-100 dataset consists of 60000 32x32 colour images in 100 classes, with
 example commands: 
 
 python scripts/cifar100.py  --seed 13 --alpha 0 --gpus_id 3 --temperature 10 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar100.py  --fkd --test_mode 1 --seed 11 --alpha 0.005 --lamdafr 0.001 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
 
 
 Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
@@ -161,6 +162,8 @@ def parse_args(buffer=False):
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+    parser.add_argument('--fkd', action='store_true', help='Switching to feature kernel distillation.')
+    parser.add_argument('--lamdafr', type=float, default=0.01, help='(only for fkd) Feature regulariser strength.')
 
     add_management_args(parser)
     add_rehearsal_args(parser)
@@ -259,6 +262,8 @@ if not args.pretrained:
                 correct, total = 0.0, 0.0
                 if args.debug_mode and epoch > 3:
                        break
+                if args.test_mode and epoch > 30:
+                       break
                 for i, data in enumerate(train_loader):
                         optimizer.zero_grad()
                         if args.debug_mode and i > 3: # only 3 batches in debug mode
@@ -346,6 +351,8 @@ print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
 student = resnet18(num_classes=100)
+student = feature_wrapper(student) # add 'get_features' function
+student = head_wrapper(student) # add 'forward_head' function
 
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
@@ -375,6 +382,9 @@ for e in range(args.n_epochs_stud):
                 with torch.no_grad(): logits = teacher(inputs)
                 optimizer.zero_grad()
                 outputs = student(inputs)
+                if args.fkd: 
+                       phi_s = student.get_features(inputs)
+                       phi_t = teacher.get_features(inputs)
                 _, pred = torch.max(outputs.data, 1)
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()
@@ -405,8 +415,14 @@ for e in range(args.n_epochs_stud):
                         else: use_teacher = teacher_predictions_results[i]
                         use_teacher = use_teacher.to(device)
                         loss = torch.mean((1 - use_teacher)*labels_loss + use_teacher*logits_loss)
+                
+                elif args.fkd: 
+                       features_loss, kernel_loss, features_norm = fkd(phi_s, phi_t, lamda_fk=1, lamda_fr=args.lamdafr)
+                       loss = alpha*labels_loss.mean() + (1-alpha)*features_loss
+
                 else: 
                        loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
+
                 loss.backward()
                 optimizer.step()
                 assert not math.isnan(loss)
@@ -447,6 +463,12 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka}
+        
+        if args.fkd: 
+               df['kernel_loss'] = kernel_loss
+               df['features_norm'] = features_norm
+
+
         wandb.log(df)
         
 print("Training completed. Full evaluation and logging...")

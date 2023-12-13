@@ -213,7 +213,7 @@ def evaluate_CKA_teacher(teacher, student, loader, device, batches=10):
        KT = compute_empirical_kernel(loader, teacher, device, batches)
        KS = compute_empirical_kernel(loader, student, device, batches)
 
-       CKA = centered_kernal_alignment(KT,KS)
+       CKA = centered_kernal_alignment(KT,KS).cpu().item()
 
        return CKA
        

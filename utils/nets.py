@@ -6,6 +6,8 @@ from torch import Tensor
 import torch.nn.functional as F
 from torchvision.models import efficientnet_v2_s, resnet50, googlenet, efficientnet_b0, MobileNetV3
 import torchvision
+from types import MethodType
+
 
 class LinearNet(nn.Module):
      
@@ -181,9 +183,17 @@ class CNN(nn.Module):
     
      def get_features(self, x):
         return self.features(x)
+     
+     def forward_head(self, phi):
+       """Forward through the head only."""
+       output = self.head(phi)
+       return output
 
-     def forward(self, x):
-        output = self.get_features(x)
+     def forward(self, x, freeze_features=False):             
+        if freeze_features: 
+             with torch.no_grad():
+                  output = self.get_features(x)
+        else: output = self.get_features(x)
         output = self.head(output)
 
         return output
@@ -325,6 +335,11 @@ class ResNet(nn.Module):
         output = self.avg_pool(output)
         output = output.view(output.size(0), -1)
         return output
+    
+    def forward_head(self, phi):
+         """Forward through the head only."""
+         output = self.fc(phi)
+         return output
 
     def forward(self, x):
         output = self.get_features(x)
@@ -352,7 +367,7 @@ def feature_wrapper(model):
                x = self.avgpool(x)
                x = torch.flatten(x, 1)
                return x
-        model.get_features = get_features
+        model.get_features = MethodType(get_features, model)
         return model
         
      if isinstance(model, torchvision.models.ResNet):
@@ -370,10 +385,37 @@ def feature_wrapper(model):
                 x = self.avgpool(x)
                 x = torch.flatten(x, 1)
                 return x
-          model.get_features = get_features
+          model.get_features = MethodType(get_features, model)
           return model
      
      if isinstance(model, CNN):
           return model
      
      raise NotImplementedError("the selected model has no 'get_features' method")
+
+
+def head_wrapper(model):
+     """Defines a 'forward_head' function in the model based on the model class."""
+
+     if isinstance(model, ResNet):
+          #there's already a feature function
+          return model 
+     
+     if isinstance(model, MobileNetV3):
+        def forward_head(self, x):
+               x = self.classifier(x)
+               return x
+        model.forward_head = MethodType(forward_head, model)
+        return model
+        
+     if isinstance(model, torchvision.models.ResNet):
+          def forward_head(self, x):
+                x = self.fc(x)
+                return x
+          model.forward_head = MethodType(forward_head, model)
+          return model
+     
+     if isinstance(model, CNN):
+          return model
+     
+     raise NotImplementedError("the selected model has no 'forward_head' method")
