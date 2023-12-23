@@ -210,10 +210,51 @@ def evaluate_CKA_teacher(teacher, student, loader, device, batches=10):
        """ evaluates CKA between teacher and student on the features (second to last layer)"""
         
        print("Evaluating CKA ... ") 
+       status = student.training
+       student.eval()
+       teacher.eval() # shouldn't be needed
        KT = compute_empirical_kernel(loader, teacher, device, batches)
        KS = compute_empirical_kernel(loader, student, device, batches)
 
        CKA = centered_kernal_alignment(KT,KS).cpu().item()
 
+       student.train(status)
+
        return CKA
-       
+
+def evaluate_FA_teacher(teacher, student, loader, device, batches=10):
+
+       print("Evaluating Features Alignment ... ") 
+       status = student.training
+       student.eval()
+       teacher.eval() # shouldn't be needed
+       FT = get_features(loader, teacher, device, batches)
+       FS = get_features(loader, student, device, batches)
+
+       FA = features_alignment(FT, FS)
+
+       student.train(status)
+
+
+       return FA
+
+def evaluate_CKAandFA_teacher(teacher, student, loader, device, batches=10):
+       print("Evaluating Features and Kernel Alignment ... calling net.eval() ") 
+       status = student.training
+       student.eval()
+       teacher.eval() # shouldn't be needed
+       FT = get_features(loader, teacher, device, batches)
+       FS = get_features(loader, student, device, batches)
+
+       FA = features_alignment(FT, FS).cpu().item()
+
+       KT = compute_empirical_kernel_from_features(FT)
+       KS = compute_empirical_kernel_from_features(FS)
+
+       CKA = centered_kernal_alignment(KT,KS).cpu().item()
+
+       student.train(status)
+
+       return FA, CKA
+
+

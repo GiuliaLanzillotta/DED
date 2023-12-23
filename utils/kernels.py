@@ -23,10 +23,21 @@ def centered_kernal_alignment(K,L):
     return CKA
 
 
-def compute_empirical_kernel(data_loader, model, device, num_batches=100):
+def features_alignment(F1,F2):
+    """ computes Feature Alignment between two feature functions.
+    F1 , F2 of shape NxD"""
+    N = F1.shape[0]
+    assert F2.shape[0] == N, "features matrices must be of the same dimensionality"
+    A = torch.trace(torch.matmul(F1, F2.T))/((N-1)**2)
+    norm1 = torch.trace(torch.matmul(F1, F1.T))/((N-1)**2)
+    norm2 = torch.trace(torch.matmul(F2, F2.T))/((N-1)**2)
+    FA = A / torch.sqrt(norm1 * norm2)
+    return FA
+
+def get_features(data_loader, model, device, num_batches=100, silent=False, center=False):
     # running estimate of the outer products and mean
     total=0
-    progress_bar = ProgressBar(verbose=True)
+    if not silent: progress_bar = ProgressBar(verbose=True)
 
     model = feature_wrapper(model) # adding 'get_features' function
     features = [] # we collect all the features in a matrix
@@ -45,10 +56,23 @@ def compute_empirical_kernel(data_loader, model, device, num_batches=100):
 
                 total += B
                 
-        progress_bar.prog(i, len(data_loader), -1, 'Collecting features', i/(min(len(data_loader),num_batches)))  
+        if not silent: progress_bar.prog(i, len(data_loader), -1, 'Collecting features', i/(min(len(data_loader),num_batches)))  
     
     F = phi.size(1) # feature dimensionality
     features = torch.vstack(features).view(total, F)
+    if center:
+        features = features - features.mean(dim=1).view(-1,1)
 
+    return features
+
+def compute_empirical_kernel(data_loader, model, device, num_batches=100, silent=False, center=False):
+    # running estimate of the outer products and mean
+    features = get_features(data_loader, model, device, num_batches, center=center)
+    kernel_matrix = torch.matmul(features, features.T)
+    return kernel_matrix
+
+def compute_empirical_kernel_from_features(features):
+    """ Features is a NxD torch Tensor with the layer features."""
+    # running estimate of the outer products and mean
     kernel_matrix = torch.matmul(features, features.T)
     return kernel_matrix

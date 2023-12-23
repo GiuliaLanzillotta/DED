@@ -481,7 +481,7 @@ if args.checkpoints_stud:
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'resnet18-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'resnet18-student-{args.seed}-{args.buffer_size}-{args.alpha}-{args.temperature}.ckpt')
 
 cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
 cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
@@ -508,5 +508,5 @@ if not args.nowand:
 # dumping everything into a log file
 path = base_path() + "results" + "/" + "cifar100" + "/" + f"resnet18" 
 if not os.path.exists(path): os.makedirs(path)
-with open(path+ "/logs.txt", 'a') as f:
+with open(path+ "/logs_v2.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

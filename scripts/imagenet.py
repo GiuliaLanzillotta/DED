@@ -9,7 +9,7 @@
 """
 example commands: 
 
-python scripts/imagenet.py --alpha 1 --gpus_id 0 --buffer_size 30000 --debug_mode 1 --distillation_type vanilla --validate_subset 5000 --batch_size 64 --pretrained --checkpoints --notes imagenet-gilmetrics-distillation --wandb_project DataEfficientDistillation
+python scripts/imagenet.py --alpha 1 --gpus_id 0 --buffer_size 30000 --distillation_type vanilla --validate_subset 5000 --batch_size 64 --pretrained --checkpoints --notes imagenet-temperature-distillation --wandb_project DataEfficientDistillation
 
 """
 
@@ -53,36 +53,61 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance
-from datasets.data_utils import load_dataset
+from utils.eval import evaluate, validation_and_agreement, distance_models, validation_agreement_function_distance, evaluate_CKA_teacher, evaluate_FA_teacher, evaluate_CKAandFA_teacher
+from dataset_utils.data_utils import load_dataset
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
-
-buffer_args = {
-                'n_epochs_stud':90,
-                'batch_size':256, 
-                'validate_subset':5000,
-                'lr':0.1,
-                'distillation_type':'vanilla'
-                }
-
+AUGMENT = True
 LOGITS_MAGNITUDE_TEACHER = 14.5#19.9
 CHKPT_NAME = "rn50_2023-02-21_10-45-30_best.ckpt"
+
+
+def setup_optimizerNscheduler(args, model, stud=False):
+        if not stud:
+              optimizer = torch.optim.SGD(model.parameters(), 
+                                lr=args.lr, 
+                                weight_decay=args.optim_wd, 
+                                momentum=args.optim_mom)
+              scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+        else: 
+                if not args.optim_adam:
+                        optimizer = torch.optim.SGD(model.parameters(), 
+                                        lr=args.lr, 
+                                        weight_decay=args.optim_wd, 
+                                        momentum=args.optim_mom)
+                else: 
+                        optimizer = torch.optim.Adam(model.parameters(), 
+                                                        lr = args.lr, 
+                                                        weight_decay=args.optim_wd)
+                if not args.optim_cosineanneal: 
+                        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+                else: 
+                        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs_stud-args.optim_warmup)
+                if args.optim_warmup > 0: 
+                        # initialise warmup scheduler
+                        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=args.optim_warmup)
+                        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, 
+                                                                        schedulers=[warmup_scheduler, scheduler], 
+                                                                        milestones=[args.optim_warmup])
+        return optimizer, scheduler
+                        
+
+              
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     path = base_path() + "/chkpts" + "/" + "imagenet" + "/" + "resnet50/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
-        shutil.copyfile(filename, path+'model_best.pth.tar')
+        shutil.copyfile(filename, path+'teacher_best.pth.tar')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
     path = base_path() + "chkpts" + "/" + "imagenet" + "/" + "resnet50/"
-    if best: filepath = path + 'model_best.pth.tar'
+    if best: filepath = path + 'teacher_best.pth.tar'
     else: filepath = path + filename
     if os.path.exists(filepath):
           print(f"Loading existing checkpoint {filepath}")
@@ -93,12 +118,13 @@ def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False
           return checkpoint
     return None 
 
-def parse_args(buffer=False):
+def parse_args():
     torch.set_num_threads(4)
     parser = ArgumentParser(description='script-experiment', allow_abbrev=False)
     parser.add_argument('--distributed', type=str, default='no', choices=['no', 'dp', 'ddp'])
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate.')
     parser.add_argument('--checkpoints', action='store_true', help='Storing a checkpoint at every epoch. Loads a checkpoint if present.')
+    parser.add_argument('--checkpoints_stud', action='store_true', help='Storing a checkpoint for the student.')
     parser.add_argument('--pretrained', action='store_true', help='Using a pre-trained network instead of training one.')
     parser.add_argument('--optim_wd', type=float, default=1e-4, help='optimizer weight decay.')
     parser.add_argument('--optim_adam', default=False, action='store_true', help='Using the Adam optimizer instead of SGD.')
@@ -108,13 +134,14 @@ def parse_args(buffer=False):
     parser.add_argument('--optim_cosineanneal', default=False, action='store_true', help='Enabling cosine annealing of learning rate..')
     parser.add_argument('--n_epochs', type=int, default=90, help='Number of epochs.')
     parser.add_argument('--n_epochs_stud', type=int, default=90, help='Number of student epochs.')
-    parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
+    parser.add_argument('--batch_size', type=int, default = 64, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     
     add_management_args(parser)
     add_rehearsal_args(parser)
 
+    parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
     parser.add_argument('--alpha', type=float, default=0.5, required=True,
                         help='The weight of labels vs logits in the distillation loss (when alpha=1 only true labels are used)')
     parser.add_argument('--MSE', default=False, action='store_true',
@@ -125,15 +152,7 @@ def parse_args(buffer=False):
     parser.add_argument('--N_BLOCKS', type=int, default=1, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
     parser.add_argument('--gamma', type=float, default=1.0, help='The mixing weight for mixed inner distillation')
     
-    args = parser.parse_known_args()[0]
-
-    if buffer:
-        best = buffer_args
-        to_parse = ['--' + k + '=' + str(v) for k, v in best.items()] + sys.argv[1:] # this way the argv args can override the best args
-        args = parser.parse_args(to_parse)
-        
-    else:
-        args = parser.parse_args()
+    args = parser.parse_args()
     return args
 
 
@@ -146,37 +165,15 @@ args.conf_host = socket.gethostname()
 if args.seed is not None:
         set_random_seed(args.seed)
 
-# dataset -> imagenet
-imagenet_root = "/local/home/stuff/imagenet/"
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
 
+train_dataset, val_dataset = load_dataset('imagenet', augment=AUGMENT)
 
-train_transform = transforms.Compose([
-                            transforms.RandomResizedCrop(224),
-                            transforms.RandomHorizontalFlip(),
-                            transforms.ToTensor(),
-                            normalize,
-                        ])
-inference_transform = transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                    normalize,
-                ])
+# initialising the teacher
+teacher = resnet50(weights=None)
 
-train_dataset = ImageFolder(imagenet_root+'train', train_transform)
-val_dataset = ImageFolder(imagenet_root+'val', inference_transform)
+params = count_parameters(teacher)
+print(f"Teacher created with {params} parameters")
 
-
-# initialising the model
-weights = None
-if args.pretrained: 
-      print("Loading pretrained weights...")
-      weights = ResNet50_Weights.IMAGENET1K_V2
-model = resnet50(weights=weights)
-
-#TODO: data parallel switch
 setproctitle.setproctitle('{}_{}_{}'.format("resnet50", args.buffer_size if 'buffer_size' in args else 0, "imagenet"))
 
 # start the training 
@@ -194,8 +191,8 @@ if not args.nowand:
 device = get_device([0]) # returns the first device in the list
 if args.distributed=='dp': 
       print(f"Parallelising training on {len(args.gpus_id)} GPUs.") 
-      model = torch.nn.DataParallel(model, device_ids=args.gpus_id).cuda()
-model.to(device)
+      teacher = torch.nn.DataParallel(teacher, device_ids=args.gpus_id).cuda()
+teacher.to(device)
 progress_bar = ProgressBar(verbose=not args.non_verbose)
 
 
@@ -208,12 +205,9 @@ val_loader = DataLoader(
         num_workers=4, pin_memory=True)
 
 if not args.pretrained:
-        model.train()
-        optimizer = torch.optim.SGD(model.parameters(), 
-                                lr=args.lr, 
-                                weight_decay=args.optim_wd, 
-                                momentum=args.optim_mom)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+        teacher.train()
+        optimizer, scheduler = setup_optimizerNscheduler(args, teacher, stud=False)
+
         results = []
         best_acc = 0.
         start_epoch = 0
@@ -221,8 +215,8 @@ if not args.pretrained:
 
         if args.checkpoints: # resuming training from the last point
                 checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
-                model.load_state_dict(checkpoint['state_dict'])
-                model.to(device)
+                teacher.load_state_dict(checkpoint['state_dict'])
+                teacher.to(device)
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 scheduler.load_state_dict(checkpoint['scheduler'])
                 start_epoch = checkpoint['epoch']
@@ -239,11 +233,11 @@ if not args.pretrained:
                                 break
                         inputs, labels = data
                         inputs, labels = inputs.to(device), labels.to(device)
-                        outputs = model(inputs)
+                        outputs = teacher(inputs)
                         _, pred = torch.max(outputs.data, 1)
                         correct += torch.sum(pred == labels).item()
                         total += labels.shape[0]
-                        loss = F.cross_entropy(outputs, labels) #TODO: maybe MSE?
+                        loss = F.cross_entropy(outputs, labels) 
                         loss.backward()
                         optimizer.step()
 
@@ -255,7 +249,7 @@ if not args.pretrained:
                         scheduler.step()
                 
                 train_acc = correct/total * 100
-                val_acc = evaluate(model, val_loader, device, num_samples=args.validate_subset)
+                val_acc = evaluate(teacher, val_loader, device, num_samples=args.validate_subset)
                 results.append(val_acc)
 
                 # best val accuracy -> selection bias on the validation set
@@ -274,7 +268,7 @@ if not args.pretrained:
                 if args.checkpoints: 
                         save_checkpoint({
                         'epoch': epoch + 1,
-                        'state_dict': model.state_dict(),
+                        'state_dict': teacher.state_dict(),
                         'best_acc': best_acc,
                         'optimizer' : optimizer.state_dict(),
                         'scheduler' : scheduler.state_dict()
@@ -282,23 +276,23 @@ if not args.pretrained:
 
 else: 
         checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
-        model.load_state_dict(checkpoint['state_dict'])
-        model.to(device)
-#val_acc = evaluate(model, val_loader, device)          
+        teacher.load_state_dict(checkpoint['state_dict'])
+        teacher.to(device)
+
+
 final_val_acc_D = checkpoint['best_acc1']
 df = {'final_val_acc_D':final_val_acc_D}
 wandb.log(df)
 
-print(f"Randomly drawing {args.buffer_size} samples")
-model.eval() # set the main model to evaluation
+print(f"Randomly drawing {args.buffer_size} samples from ImageNet")
+teacher.eval() # set the main teacher to evaluation
 all_indices = set(range(len(train_dataset)))
-random_indices = np.random.choice(list(all_indices), 
-                                size=args.buffer_size, replace=False)
+random_indices = np.random.choice(list(all_indices), size=args.buffer_size, replace=False)
 left_out_indices = all_indices.difference(set(random_indices.flatten()))
 train_subset = Subset(train_dataset, random_indices)
 buffer_loader =  DataLoader(train_subset, 
                                 batch_size=args.batch_size, 
-                                shuffle=True, 
+                                shuffle=False, 
                                 num_workers=4, 
                                 pin_memory=True)
 train_leftout_subset = Subset(train_dataset, list(left_out_indices))
@@ -308,59 +302,39 @@ train_leftout_loader = DataLoader(train_leftout_subset,
                                 num_workers=4, 
                                 pin_memory=False)
 
-
-
-args = parse_args(buffer=True)
 experiment_log = vars(args)
 experiment_log['final_val_acc_D'] = final_val_acc_D.detach().item()
 
 
 
-print("Starting buffer training ... ")
+print("Starting student training ... ")
 start = time.time()
-# re-initialise model 
-buffer_model = resnet50(weights=None)
+# re-initialise teacher 
+student = resnet50(weights=None)
+student = feature_wrapper(student) # add 'get_features' function
+student = head_wrapper(student) # add 'forward_head' function
+
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
-      buffer_model = torch.nn.DataParallel(buffer_model, device_ids=args.gpus_id).to(device)
-buffer_model.to(device)
-buffer_model.train()
-val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
-                        shuffle=False, num_workers=3, pin_memory=True)
-if not args.optim_adam:
-        optimizer = torch.optim.SGD(buffer_model.parameters(), 
-                            lr=args.lr, 
-                            weight_decay=args.optim_wd, 
-                            momentum=args.optim_mom)
-else: 
-        optimizer = torch.optim.Adam(buffer_model.parameters(), 
-                                        lr = args.lr, 
-                                        weight_decay=args.optim_wd)
-if not args.optim_cosineanneal: 
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-else: 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.n_epochs_stud-args.optim_warmup)
-if args.optim_warmup > 0: 
-       # initialise warmup scheduler
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=args.optim_warmup)
-        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, 
-                                                          schedulers=[warmup_scheduler, scheduler], 
-                                                          milestones=[args.optim_warmup])
-        
+      student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
+student.to(device)
+student.train()
 
+optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 if args.distillation_type == 'inner':
         # registering forward hooks in the teacher network
-        register_module_hooks_network(buffer_model, args.N_BLOCKS)
-        register_module_hooks_network(model, args.N_BLOCKS)
+        register_module_hooks_network(student, args.N_BLOCKS)
+        register_module_hooks_network(teacher, args.N_BLOCKS)
 
 if args.distillation_type == 'inner-parallel': 
-       register_module_hooks_network_deep(model, parallel=True)
+       register_module_hooks_network_deep(teacher, parallel=True)
 
 
 
-results = []
 alpha = args.alpha
+T = args.temperature
+
 for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
@@ -373,39 +347,43 @@ for e in range(args.n_epochs_stud):
                 inputs, labels = data
                 inputs, labels = inputs.to(device), labels.to(device)
                 
-                with torch.no_grad(): logits = model(inputs)
+                with torch.no_grad(): logits = teacher(inputs)
                 optimizer.zero_grad()
-                outputs = buffer_model(inputs)
-                if args.distillation_type=='inner-parallel': outputs.detach()
+                outputs = student(inputs)
+                #if args.distillation_type=='inner-parallel': outputs.detach()
+                
                 _, pred = torch.max(outputs.data, 1)
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()
                 agreement += torch.sum(pred == pred_t).item()
-                function_distance += torch.sum(torch.norm(F.softmax(outputs, dim=1)-F.softmax(logits, dim=1), dim=1, p=2)).item()
                 total += labels.shape[0]
                 
                 # the distillation loss
-                if args.distillation_type=='vanilla':
-                       logits_loss = vanilla_distillation(outputs, logits)
-                elif args.distillation_type=='topK':
-                       logits_loss = topK_distillation(outputs, logits, K=args.K)
-                elif args.distillation_type=='inner':
-                       logits_loss, _ = mixed_inner_distillation_free(buffer_model.activation, model.activation, gamma=args.gamma)
-                elif args.distillation_type=='inner-parallel':
-                       logits_loss = deep_inner_distillation(buffer_model, model.activation)
-                elif args.distillation_type=='topbottomK':
-                       logits_loss = topbottomK_distillation(outputs, logits, K=args.K)
-                elif args.distillation_type=='randomK': 
-                       logits_loss = randomK_distillation(outputs, logits, K=args.K)
+                # if args.distillation_type=='vanilla':
+                #        logits_loss = vanilla_distillation(outputs, logits)
+                # elif args.distillation_type=='topK':
+                #        logits_loss = topK_distillation(outputs, logits, K=args.K)
+                # elif args.distillation_type=='inner':
+                #        logits_loss, _ = mixed_inner_distillation_free(student.activation, teacher.activation, gamma=args.gamma)
+                # elif args.distillation_type=='inner-parallel':
+                #        logits_loss = deep_inner_distillation(student, teacher.activation)
+                # elif args.distillation_type=='topbottomK':
+                #        logits_loss = topbottomK_distillation(outputs, logits, K=args.K)
+                # elif args.distillation_type=='randomK': 
+                #        logits_loss = randomK_distillation(outputs, logits, K=args.K)
+                
                 # the labels loss 
                 if args.MSE: 
-                      labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=1000).to(torch.float) * LOGITS_MAGNITUDE_TEACHER)  # Bobby's correction
+                        labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=1000).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
+                        logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 else:
-                      labels_loss = F.cross_entropy(outputs, labels)
-                loss = alpha*labels_loss + (1-alpha)*logits_loss
+                        labels_loss = F.cross_entropy(outputs, labels, reduction='none')
+                        logits_loss = F.kl_div(input=F.log_softmax(outputs/T, dim=1), target=F.softmax(logits/T, dim=1), log_target=False, reduction='none').sum(dim=1) * (T**2) # temperature rescaling (for gradients)
+                
+                loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
+                
                 loss.backward()
                 optimizer.step()
-
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(buffer_loader), e, 'S', loss.item())
                 avg_loss += loss
@@ -416,58 +394,59 @@ for e in range(args.n_epochs_stud):
         
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100
-        train_function_distance = function_distance/total
-        train_leftout_acc = evaluate(buffer_model, train_leftout_loader, device, num_samples=args.validate_subset)
-        teacher_student_distance = distance_models(model, buffer_model)
-        val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device, num_samples=args.validate_subset)
-        results.append(val_acc)
-        is_best = val_acc > best_acc 
-        # measure distance in parameter space between the teacher and student models 
 
+        # measure distance in parameter space between the teacher and student teachers 
+        teacher_student_distance = distance_models(teacher, student)
+        val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, device, num_samples=args.validate_subset)
+
+        fa, cka = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=10)
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
-        print('Train left-out accuracy : {} %'.format(round(train_leftout_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
         
         df = {'epoch_loss_S':avg_loss,
-              'epoch_train_acc_S':train_acc,
-              'epoch_train_agreement':train_agreement,
-              'epoch_train_function_distance':train_function_distance,
-              'epoch_distance_teacher_student':teacher_student_distance,
-              'epoch_train_leftout_acc_S':train_leftout_acc,
-              'epoch_val_acc_S':val_acc,
-              'epoch_val_agreement':val_agreement,
-              'epoch_val_function_distance':val_function_distance}
+                'epoch_train_acc_S':train_acc,
+                'epoch_train_agreement':train_agreement,
+                'epoch_distance_teacher_student':teacher_student_distance,
+                'epoch_val_acc_S':val_acc,
+                'epoch_val_agreement':val_agreement,
+                'epoch_cka_train':cka,
+                'epoch_fa_train':fa
+                }
         wandb.log(df)
 
 
 print("Training completed. Full evaluation and logging...")
 end = time.time()
 
-experiment_log['buffer_train_time'] = end-start
-experiment_log['final_train_acc_S'] = train_acc
-train_leftout_acc = evaluate(buffer_model, train_leftout_loader, device, num_samples=len(val_loader)) #restricting the number of samples otw it takes ages
-val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(buffer_model, model, val_loader, device)
-
-if args.checkpoints: 
+if args.checkpoints_stud: 
         save_checkpoint({
         'epoch': e + 1,
-        'state_dict': buffer_model.state_dict(),
+        'state_dict': student.state_dict(),
         'best_acc': val_acc,
         'optimizer' : optimizer.state_dict(),
         'scheduler' : scheduler.state_dict()
-        }, False, filename=f'rn50-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+        }, False, filename=f'rn50-student-{args.seed}-{args.buffer_size}-{args.alpha}-{args.temperature}.ckpt')
+
+fa_train, cka_train = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=20)
+fa_val, cka_val = evaluate_CKAandFA_teacher(teacher, student, val_loader, device, batches=10)
 
 
+experiment_log['final_cka_train'] = cka_train
+experiment_log['final_cka_val'] = cka_val
+experiment_log['final_fa_train'] = fa_train
+experiment_log['final_fa_val'] = fa_val
+experiment_log['buffer_train_time'] = end-start
+experiment_log['final_train_acc_S'] = train_acc
 
-experiment_log['final_train_leftout_acc_S'] = train_leftout_acc
+val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, device)
+
 experiment_log['final_val_acc_S'] = val_acc
 experiment_log['final_train_agreement'] = train_agreement
-experiment_log['final_train_function_distance'] = train_function_distance
 experiment_log['final_val_agreement'] = val_agreement
-experiment_log['final_val_function_distance'] = val_function_distance
 experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
+experiment_log['runs_id'] = "Dec18"
 
 
 if not args.nowand:

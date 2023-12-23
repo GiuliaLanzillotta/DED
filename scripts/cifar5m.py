@@ -59,7 +59,7 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, evaluate_CKA_teacher, validation_and_agreement, distance_models, validation_agreement_function_distance
+from utils.eval import evaluate, evaluate_CKA_teacher, evaluate_CKAandFA_teacher, validation_and_agreement, distance_models, validation_agreement_function_distance
 from dataset_utils.data_utils import load_dataset
 
 try:
@@ -69,7 +69,8 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 
 AUGMENT = True
-NETWORK = 'resnet18'
+TEACHER_NETWORK = 'resnet18'
+STUDENT_NETWORK = 'resnet18'
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -101,14 +102,14 @@ def setup_optimizerNscheduler(args, model, stud=False):
         
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + f"{NETWORK}/"
+    path = base_path() + "/chkpts" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}/"
     if not os.path.exists(path): os.makedirs(path)
     torch.save(state, path+filename)
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
 def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
-    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + f"{NETWORK}/"
+    path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + f"{TEACHER_NETWORK}/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
@@ -181,11 +182,12 @@ C = args.C
 
 # initialising the model
 #teacher = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
-teacher = resnet18(num_classes=10)
+if TEACHER_NETWORK=="resnet18": teacher = resnet18(num_classes=10)
+elif TEACHER_NETWORK=="CNN": teacher = CNN(c=C, num_classes=10, use_batch_norm=True)
 model_size = count_parameters(teacher)
-print(f"Teacher {NETWORK} created with {model_size} parameters.")
+print(f"Teacher {TEACHER_NETWORK} created with {model_size} parameters.")
 
-setproctitle.setproctitle('{}_{}_{}'.format(f"{NETWORK}", args.buffer_size if 'buffer_size' in args else 0, "cifar5m"))
+setproctitle.setproctitle('{}_{}_{}'.format(f"{TEACHER_NETWORK}", args.buffer_size if 'buffer_size' in args else 0, "cifar5m"))
 
 # start the training 
 print(args)
@@ -194,7 +196,7 @@ os.environ["CUDA_VISIBLE_DEVICES"]=",".join([str(d) for d in args.gpus_id])
 if not args.nowand:
         assert wandb is not None, "Wandb not installed, please install it or run without wandb"
         if args.wandb_name is None: 
-                name = str.join("-",["offline", "cifar5m", f"{NETWORK}", args.conf_timestamp])
+                name = str.join("-",["offline", "cifar5m", f"{TEACHER_NETWORK}", args.conf_timestamp])
         else: name = args.wandb_name
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, 
                         name=name, notes=args.notes, config=vars(args)) 
@@ -215,7 +217,7 @@ val_loader = DataLoader(C5m_test, batch_size=args.batch_size,
 
 
 
-CHKPT_NAME = f'{NETWORK}-teacher.ckpt' # obtaineed with seed = 11
+CHKPT_NAME = f'{TEACHER_NETWORK}-teacher.ckpt' # obtaineed with seed = 11
 
 if not args.pretrained:
         teacher.train()
@@ -324,7 +326,8 @@ buffer_loader =  DataLoader(student_data,
 args = parse_args(buffer=True)
 experiment_log = vars(args)
 experiment_log['final_val_acc_D'] = final_val_acc_D
-experiment_log['network'] = NETWORK
+experiment_log['teacher_network'] = TEACHER_NETWORK
+experiment_log['student_network'] = STUDENT_NETWORK
 experiment_log['C'] = C
 
 
@@ -333,7 +336,8 @@ print("Starting student training ... ")
 start = time.time()
 # re-initialise model 
 #student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
-student=resnet18(num_classes=10)
+if STUDENT_NETWORK=="resnet18": student = resnet18(num_classes=10)
+elif STUDENT_NETWORK=="CNN": student = CNN(c=C, num_classes=10, use_batch_norm=True)
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
       student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
@@ -422,7 +426,8 @@ for e in range(args.n_epochs_stud):
         teacher_student_distance = distance_models(teacher, student)
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
-        cka = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=10)
+        
+        fa, cka = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=10)
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
@@ -433,7 +438,9 @@ for e in range(args.n_epochs_stud):
               'epoch_distance_teacher_student':teacher_student_distance,
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
-              'epoch_cka_train':cka}
+              'epoch_cka_train':cka,
+              'epoch_fa_train':fa
+        }
         
         if args.fkd: 
                df['kernel_loss'] = kernel_loss
@@ -452,18 +459,19 @@ if args.checkpoints_stud:
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'{NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'{STUDENT_NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
 
-cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
-cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
+fa_train, cka_train = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=20)
+fa_val, cka_val = evaluate_CKAandFA_teacher(teacher, student, val_loader, device, batches=10)
 
 
-experiment_log['buffer_train_time'] = end-start
-experiment_log['final_train_acc_S'] = train_acc
 experiment_log['final_cka_train'] = cka_train
 experiment_log['final_cka_val'] = cka_val
-experiment_log['network'] = f'{NETWORK}'
+experiment_log['final_fa_train'] = fa_train
+experiment_log['final_fa_val'] = fa_val
+experiment_log['buffer_train_time'] = end-start
+experiment_log['final_train_acc_S'] = train_acc
 
 
 val_acc, val_agreement, val_function_distance = validation_agreement_function_distance(student, teacher, val_loader, device)
@@ -481,7 +489,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{NETWORK}" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}_v2" 
 if not os.path.exists(path): os.makedirs(path)
 with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

@@ -8,7 +8,7 @@ The CIFAR-100 dataset consists of 60000 32x32 colour images in 100 classes, with
 
 example commands: 
 
-python scripts/cifar100_kerd.py  --lamdafk 300  --cka  --seed 11  --gpus_id 0 --buffer_size 1200 --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
+python scripts/cifar100_kerd.py  --block_gradient --lamdafk 1  --cka  --seed 11  --gpus_id 0 --buffer_size 1200 --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
 
 
 Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
