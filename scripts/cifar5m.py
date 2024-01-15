@@ -9,9 +9,10 @@ We use cifar5m, an extension to 5 mln images in order to train the student on mo
 
 example commands: 
 
-python scripts/cifar5m.py --seed 11 --asymmetric_temperature --temperature 0.1 --alpha 0 --gpus_id 1 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18-AT --wandb_project DataEfficientDistillation
+python scripts/cifar5m.py --seed 11 --temper_labels --temperature 20 --alpha 1 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-TL --wandb_project DataEfficientDistillation
 python scripts/cifar5m.py --seed 11 --fkd --alpha 0.003 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18 --wandb_project DataEfficientDistillation
 
+python scripts/cifar5m.py --seed 11 --temperature 20 --alpha 0 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-NTK --wandb_project DataEfficientDistillation
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
 
@@ -59,7 +60,8 @@ from utils.conf import set_random_seed, get_device, base_path
 from utils.status import ProgressBar
 from utils.stil_losses import *
 from utils.nets import *
-from utils.eval import evaluate, evaluate_CKA_teacher, evaluate_CKAandFA_teacher, validation_and_agreement, distance_models, validation_agreement_function_distance
+from utils.ntk import save_ntk
+from utils.eval import evaluate, evaluate_CKA_teacher, evaluate_CKAandFA_teacher, evaluate_NTK_alignment_teacher, validation_and_agreement, distance_models, validation_agreement_function_distance
 from dataset_utils.data_utils import load_dataset
 
 try:
@@ -69,8 +71,8 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 
 AUGMENT = True
-TEACHER_NETWORK = 'resnet18'
-STUDENT_NETWORK = 'resnet18'
+TEACHER_NETWORK = 'CNN'
+STUDENT_NETWORK = 'CNN'
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -138,8 +140,8 @@ def parse_args(buffer=False):
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+    parser.add_argument('--temper_labels', action='store_true', help='Whether to use temperature in labels training (alpha>0)')
     parser.add_argument('--asymmetric_temperature', action='store_true', help='Temperature is only added to the teacher distribution.')
-    parser.add_argument('--fkd', action='store_true', help='Switching to feature kernel distillation.')
 
 
     add_management_args(parser)
@@ -172,7 +174,6 @@ if args.seed is not None:
 #C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
 
 C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
-
 
 print(f"Randomly drawing {60000} samples for the Cifar5M base")
 all_indices = set(range(len(C5m_train)))
@@ -338,6 +339,9 @@ start = time.time()
 #student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
 if STUDENT_NETWORK=="resnet18": student = resnet18(num_classes=10)
 elif STUDENT_NETWORK=="CNN": student = CNN(c=C, num_classes=10, use_batch_norm=True)
+model_size = count_parameters(student)
+print(f"Student {STUDENT_NETWORK} created with {model_size} parameters.")
+
 if args.distributed=='dp': 
       print(f"Parallelising buffer training on {len(args.gpus_id)} GPUs.")
       student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
@@ -351,6 +355,9 @@ average_magnitude=0
 alpha = args.alpha
 loss_zero = False
 T = args.temperature
+# teacher_name = f'{TEACHER_NETWORK}-cifar5m'
+student_name = f'{STUDENT_NETWORK}-{args.alpha}-{args.buffer_size}-{args.seed}-cifar5m'
+ntk_savedir = path = base_path() + "/results" + "/" + "cifar5m" + "/" + f"{TEACHER_NETWORK}/" 
 for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
@@ -367,10 +374,6 @@ for e in range(args.n_epochs_stud):
                 optimizer.zero_grad()
                 outputs = student(inputs)
 
-                if args.fkd: 
-                       phi_s = student.get_features(inputs)
-                       phi_t = teacher.get_features(inputs)
-
                 _, pred = torch.max(outputs.data, 1)
                 _, pred_t = torch.max(logits.data, 1)
                 correct += torch.sum(pred == labels).item()
@@ -386,22 +389,23 @@ for e in range(args.n_epochs_stud):
                        labels_loss = F.mse_loss(outputs, F.one_hot(labels, num_classes=10).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
                        logits_loss = F.mse_loss(outputs, logits, reduction='none').mean(dim=1)
                 else:
-                      teacher_p = F.softmax(logits/T)
+                      teacher_p = F.softmax(logits/T, dim=1)
                       if args.asymmetric_temperature:
-                             student_p = F.log_softmax(outputs)
+                             student_p = F.log_softmax(outputs, dim=1)
                              scaling_factor = 1
                       else: 
-                             student_p=F.log_softmax(outputs/T)
+                             student_p=F.log_softmax(outputs/T, dim=1)
                              scaling_factor = T**2
-                             
-                      labels_loss = F.cross_entropy(outputs, labels, reduction='none')
+
+                      if args.temper_labels: 
+                             outputs = outputs/T #CHECK: no weighing on the labels?
+                             labels_scaling_factor = 1
+                      else: labels_scaling_factor = 1
+                      labels_loss = F.cross_entropy(outputs, labels, reduction='none') * labels_scaling_factor
                       logits_loss = F.kl_div(input=student_p, target=teacher_p, log_target=False, reduction='none').sum(dim=1) * scaling_factor # temperature rescaling (for gradients)
                 
-                if args.fkd: 
-                       features_loss, kernel_loss, features_norm = fkd(phi_s, phi_t, lamda_fk=1, lamda_fr=0.03)
-                       loss = alpha*labels_loss.mean() + (1-alpha)*features_loss
 
-                else: loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
+                loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
 
                 loss.backward()
                 optimizer.step()
@@ -423,11 +427,17 @@ for e in range(args.n_epochs_stud):
         train_acc = (correct/total) * 100
         train_agreement = (agreement/total) * 100      
         # measure distance in parameter space between the teacher and student models 
-        teacher_student_distance = distance_models(teacher, student)
+        if TEACHER_NETWORK==STUDENT_NETWORK: 
+               teacher_student_distance = distance_models(teacher, student)
+        else: teacher_student_distance=-1
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
         
-        fa, cka = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=10)
+        cka = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=10)
+        ntk_cka = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
+                                                 num_batches=7, savedir=ntk_savedir, load=e>0)
+        # ntk_cka = evaluate_NTK_alignment_teacher(teacher, student, ntk_savedir, buffer_loader, 
+        #                         subset=5000, names=(teacher_name, student_name))
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
@@ -439,12 +449,10 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka,
-              'epoch_fa_train':fa
+              'epoch_ntk_alignment_train':ntk_cka
+              #'epoch_fa_train':fa
         }
         
-        if args.fkd: 
-               df['kernel_loss'] = kernel_loss
-               df['features_norm'] = features_norm
 
         wandb.log(df)
         
@@ -462,14 +470,20 @@ if args.checkpoints_stud:
                 }, False, filename=f'{STUDENT_NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
 
-fa_train, cka_train = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=20)
-fa_val, cka_val = evaluate_CKAandFA_teacher(teacher, student, val_loader, device, batches=10)
+cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
+cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
+ntk_cka_train = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
+                                               num_batches=7, savedir=ntk_savedir, load=True)
+ntk_cka_val = evaluate_NTK_alignment_teacher(teacher, student, val_loader, device, num_batches=7, 
+                                             savedir=None, load=False)
 
 
 experiment_log['final_cka_train'] = cka_train
 experiment_log['final_cka_val'] = cka_val
-experiment_log['final_fa_train'] = fa_train
-experiment_log['final_fa_val'] = fa_val
+experiment_log['final_ntk_train'] = ntk_cka_train
+experiment_log['final_ntk_val'] = ntk_cka_val
+#experiment_log['final_fa_train'] = fa_train
+#experiment_log['final_fa_val'] = fa_val
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 
@@ -489,7 +503,7 @@ if not args.nowand:
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}_v2" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}" 
 if not os.path.exists(path): os.makedirs(path)
-with open(path+ "/logs.txt", 'a') as f:
+with open(path+ "/logs_ntk.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

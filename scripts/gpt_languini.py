@@ -11,18 +11,20 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=3,1 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=2 --master_addr=localhost --master_port=23481 scripts/gpt_languini.py mini\
+CUDA_VISIBLE_DEVICES=4 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=12235 scripts/gpt_languini.py mini2\
   --alpha 0 \
   --train_batch_size 128 \
-  --decay_steps 200000 \
-  --max_train_steps 200000 \
+  --decay_steps 45000 \
+  --max_train_steps 45000 \
   --gradient_accumulation_steps 16 \
   --tokens_per_second 16618 \
   --log_terminal_every 100 \
+  --log_metrics_every 100 \
   --eval_every 100 \
-  --log_grads_every 200000 \
-  --log_ckpt_every 200000 \
-  --seed 33 \
+  --log_grads_every -1 \
+  --log_ckpt_every -1 \
+  --seed 11 \
+  --temperature 1.5
 
 """
 
@@ -136,6 +138,7 @@ def run(config, logger, teacher_config=None):
 
     ## Setup Trainer
     trainer = lm_trainer.LMDistilTrainer(config=c,
+                                        config_t=teacher_config,
                                         logger=logger,
                                         model=model,
                                         teacher=teacher,
@@ -188,7 +191,7 @@ def main():
 
     # Generate experiment name based on config
     #configs.add_exp_name(config)
-    config.wandb_notes = EXPERIMENT_NOTE+"_reverseKL"
+    config.wandb_notes = EXPERIMENT_NOTE
     config.exp_name = "-".join([EXPERIMENT_NOTE,config_name])
     config.exp_id = str(datetime.datetime.now())
     mprint(f"experiment name: {config.exp_name}")

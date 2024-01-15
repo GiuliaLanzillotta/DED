@@ -10,6 +10,7 @@ example commands:
 
 python scripts/cifar100.py  --seed 13 --alpha 0 --gpus_id 3 --temperature 10 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
 python scripts/cifar100.py  --fkd --test_mode 1 --seed 11 --alpha 0.005 --lamdafr 0.001 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
+python scripts/cifar100.py --alpha 0 --buffer_size 12000 --gpus_id 0 --temperature 20 --seed 11 --batch_size 128  --label_smoothing --checkpoints --notes cifar100-resnet18-distillation-labelsmoothing --wandb_project DataEfficientDistillation
 
 
 Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
@@ -162,8 +163,7 @@ def parse_args(buffer=False):
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
-    parser.add_argument('--fkd', action='store_true', help='Switching to feature kernel distillation.')
-    parser.add_argument('--lamdafr', type=float, default=0.01, help='(only for fkd) Feature regulariser strength.')
+    parser.add_argument('--label_smoothing', action='store_true', help='Using manually designed teacher through label smoothing.')
 
     add_management_args(parser)
     add_rehearsal_args(parser)
@@ -306,7 +306,7 @@ if not args.pretrained:
                 df = {'epoch_loss_D':avg_loss/total,
                 'epoch_train_acc_D':train_acc,
                 'epoch_val_acc_D':val_acc}
-                wandb.log(df)
+                if not args.nowand: wandb.log(df)
 
 
         if args.checkpoints and start_epoch<args.n_epochs: 
@@ -326,7 +326,7 @@ else:
         final_val_acc_D = checkpoint['best_acc']
 
 df = {'final_val_acc_D':final_val_acc_D}
-wandb.log(df)
+if not args.nowand: wandb.log(df)
 
 
 print(f"Randomly drawing {args.buffer_size} samples from Cifar100 ")
@@ -367,6 +367,7 @@ average_magnitude=0
 teacher_predictions_results = {} # dictionary where to store the teacher predictions check results for every batch
 alpha = args.alpha
 T = args.temperature
+a = 0.99 # label smoothing hp
 for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
@@ -380,16 +381,11 @@ for e in range(args.n_epochs_stud):
                 inputs, labels = inputs.to(device), labels.to(device)
                 
                 with torch.no_grad(): logits = teacher(inputs)
-                optimizer.zero_grad()
+                if args.label_smoothing: 
+                       if e==0: print("Label smoothing ON. ")
+                       logits = F.one_hot(labels, num_classes=100).to(torch.float)*a
+                       logits += (1-logits)*((1-a)/(1-100))
                 outputs = student(inputs)
-                if args.fkd: 
-                       phi_s = student.get_features(inputs)
-                       phi_t = teacher.get_features(inputs)
-                _, pred = torch.max(outputs.data, 1)
-                _, pred_t = torch.max(logits.data, 1)
-                correct += torch.sum(pred == labels).item()
-                agreement += torch.sum(pred == pred_t).item()
-                total += labels.shape[0]
 
                 if LOGITS_MAGNITUDE_TEACHER == 1: # estimate during the first epoch
                        average_non_max = (logits.sum(dim=1) - logits.max(dim=1)[0])/9 # average over the non-max outputs
@@ -416,20 +412,25 @@ for e in range(args.n_epochs_stud):
                         use_teacher = use_teacher.to(device)
                         loss = torch.mean((1 - use_teacher)*labels_loss + use_teacher*logits_loss)
                 
-                elif args.fkd: 
-                       features_loss, kernel_loss, features_norm = fkd(phi_s, phi_t, lamda_fk=1, lamda_fr=args.lamdafr)
-                       loss = alpha*labels_loss.mean() + (1-alpha)*features_loss
-
                 else: 
                        loss = alpha*labels_loss.mean() + (1-alpha)*logits_loss.mean()
 
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                assert not math.isnan(loss)
-                progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
-                avg_loss += loss*(labels.shape[0])
 
                 if e==0: warmup_scheduler.step()
+
+                assert not math.isnan(loss)
+                progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
+
+
+                avg_loss += loss*(labels.shape[0])
+                _, pred = torch.max(outputs.data, 1)
+                _, pred_t = torch.max(logits.data, 1)
+                correct += torch.sum(pred == labels).item()
+                agreement += torch.sum(pred == pred_t).item()
+                total += labels.shape[0]
         
         avg_loss = avg_loss/total
         if scheduler is not None:
@@ -463,13 +464,9 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka}
-        
-        if args.fkd: 
-               df['kernel_loss'] = kernel_loss
-               df['features_norm'] = features_norm
 
 
-        wandb.log(df)
+        if not args.nowand: wandb.log(df)
         
 print("Training completed. Full evaluation and logging...")
 end = time.time()

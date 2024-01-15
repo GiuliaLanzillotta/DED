@@ -89,7 +89,7 @@ def fkd(A_s, A_t, lamda_fr, lamda_fk):
     loss = lamda_fk*kernel_loss + lamda_fr*features_regulariser
     return loss, kernel_loss, features_regulariser
 
-def cka_loss(A_s, A_t):
+def cka_loss(A_s, A_t, power=1):
     """ Feature kernel distillation between student and teacher. 
         - A_s: BxDs matrix with student features
         - A_t: BxDt matrix with teacher features """
@@ -102,6 +102,18 @@ def cka_loss(A_s, A_t):
 
     loss = 1 - centered_kernal_alignment(ker_s, ker_t)
     return loss
+
+def cka_loss(ker_s, ker_t):
+    """ Feature kernel distillation between student and teacher. 
+        - ker_s: BxB kernel matrix for student
+        - ker_t: BxB kernel matrix for teacher"""
+    loss = 1 - centered_kernal_alignment(ker_s, ker_t)
+    return loss
+
+def features_mse(phi_s, phi_t):
+    """Loss for feature distillation."""
+    assert phi_s.shape == phi_t.shape, "Student and Teacher features must be matching for feature distillation."
+    return F.mse_loss(phi_s, phi_t)
 
 def kernel_inner_distillation_free(student_activations, teacher_activations):
     """ Distillation comparing the feature kernels of the layers recorded. """

@@ -10,6 +10,8 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.nn.utils import parameters_to_vector
 
 from utils.kernels import *
+from utils.ntk import *
+from utils.kernels import get_features as collect_features
 
 def hellinger(p, q):
         """ The Hellinger distance is a bounded metric on the space of 
@@ -222,14 +224,62 @@ def evaluate_CKA_teacher(teacher, student, loader, device, batches=10):
 
        return CKA
 
+# def evaluate_NTK_alignment_teacher(teacher, student, savedir, loader, subset=5000, names=("",""), load_teacher=True):
+#        print("Evaluating NTK alignment ... ") 
+#        status = student.training
+#        student.eval()
+#        teacher.eval() # shouldn't be needed
+#        tname, sname = names
+#        KT = get_ntk_empirical_ntks(teacher, loader, savedir, subset=subset, name=tname, workers_per_device=4)
+#        KS = get_ntk_empirical_ntks(student, loader, savedir, load=load_teacher, subset=subset, name=sname, workers_per_device=4)
+
+#        CKA = centered_kernal_alignment(KT,KS).item()
+
+#        student.train(status)
+
+#        return CKA
+
+
+def evaluate_NTK_alignment_teacher(teacher, student, loader, device, num_batches=100, 
+                                   savedir=None, load=True, save_student=False, student_name=""):
+       print("Evaluating NTK alignment ... ") 
+
+       status = student.training
+       student.eval()
+       teacher.eval() # shouldn't be needed
+
+       loaded = False
+       if load: 
+              try: 
+                     KT = load_ntk(savedir, "teacher", map_location=None)
+                     loaded = True
+                     print("Loaded teacher NTK.")
+              except AssertionError: print("Computing teacher NTK.")
+       
+       if not loaded: KT = get_ntk(loader, device, teacher, num_batches=num_batches, silent=False, mode="trace")
+       
+       KS = get_ntk(loader, device, student, num_batches=num_batches, silent=False, mode="trace")
+       CKA = centered_kernal_alignment(KT,KS).item()
+
+       if savedir is not None and not loaded: 
+              # save the teacher 
+              save_ntk(KT, savedir, "teacher")
+              if save_student:
+                     save_ntk(KS, savedir, student_name)
+        
+
+       student.train(status)
+
+       return CKA
+
 def evaluate_FA_teacher(teacher, student, loader, device, batches=10):
 
        print("Evaluating Features Alignment ... ") 
        status = student.training
        student.eval()
        teacher.eval() # shouldn't be needed
-       FT = get_features(loader, teacher, device, batches)
-       FS = get_features(loader, student, device, batches)
+       FT = collect_features(loader, teacher, device, batches)
+       FS = collect_features(loader, student, device, batches)
 
        FA = features_alignment(FT, FS)
 
@@ -243,8 +293,8 @@ def evaluate_CKAandFA_teacher(teacher, student, loader, device, batches=10):
        status = student.training
        student.eval()
        teacher.eval() # shouldn't be needed
-       FT = get_features(loader, teacher, device, batches)
-       FS = get_features(loader, student, device, batches)
+       FT = collect_features(loader, teacher, device, batches)
+       FS = collect_features(loader, student, device, batches)
 
        FA = features_alignment(FT, FS).cpu().item()
 

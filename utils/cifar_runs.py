@@ -3,7 +3,7 @@ dividing the GPUs equally between them
 
 example commands: 
 
-python utils/cifar_runs.py python scripts/cifar5m.py --batch_size 128 --checkpoints --notes cifar5m-distillation-resnet18 --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py --batch_size 128 --checkpoints --notes cifar5m-distillation-CNN-v2 --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar5m_zeroloss.py  --MSE --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar5m_SSL.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-SSL --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar10_mixed.py --reset_optim --batch_size 128  --checkpoints --notes cifar10-mixeddistillation-all --wandb_project DataEfficientDistillation
@@ -13,6 +13,12 @@ python utils/cifar_runs.py python scripts/cifar5m_2heads.py --MSE --distillation
 python utils/cifar_runs.py python scripts/cifar5m_conditionalteacher.py --MSE --K 3 --batch_size 128  --checkpoints --notes cifar5m-convnet_scaledloss-distillation --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar100.py --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation-v2 --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar100_kerd.py  --lamdafk 1  --cka  --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py --temper_labels --alpha 1 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-TL --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-NTK --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar100_kerd.py --block_gradient --symmetric --outer_temperature 1 --lamdafk 100 --lamdafr 0.01  --cka --teacher_targets   --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar100_linear_retraining.py  --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-linretraining --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar100.py --batch_size 128  --label_smoothing --checkpoints --notes cifar100-resnet18-distillation-labelsmoothing --wandb_project DataEfficientDistillation
+
 
 """
 import os
@@ -22,14 +28,16 @@ import subprocess
 
 
 SEEDS = [11, 13, 21, 33, 55]#,5,138,228,196,118
+#SEEDS=[11]
 #BUFFER_SIZES = [60000, 120000, 600000] 
 BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000]
-BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000, 120000, 600000]
-TEMPERATURES = [0.1, 1, 3, 5, 10, 20, 100]
-PROPORTIONS = [0.1, 0.2, 0.4, 0.6, 0.8] # 1200000, 600000, 120000, 60000
-PARALLEL_ORDER = 8
-GPUIDS = [0,1,2,3,4,5,6,7]
+#BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000, 120000, 600000]
+TEMPERATURES = [1, 20, 100]
+#TEMPERATURES = [0.1, 0.33, 0.5, 1.0, 2.0]
 
+PARALLEL_ORDER = 4
+#GPUIDS = [0,1,2,3,4,5,6,7]
+GPUIDS = [0,1,2,3]
 def crange(start, end, modulo):
     # implementing circular range
     if start > end:
@@ -49,7 +57,7 @@ job_count=0
 
 for b in BUFFER_SIZES:
     for seed in SEEDS:
-        for alpha in [0.0, 1.0]:
+        for alpha in [0.0, 0.9]:
             for T in TEMPERATURES:
             #for k in K: # for topK distillation
             #for b in N_BLOCKS: # inner block distillation
@@ -60,21 +68,17 @@ for b in BUFFER_SIZES:
                 # else:
                 #T=20
                 if alpha==1.0 and T!=1:
-                    continue
+                   continue
 
                 new_argv.append(f'--temperature {T} ')
-                #new_argv.append(f'--asymmetric_temperature')
-                #new_argv.append(f'--alpha {alpha} ')
+                #new_argv.append(f'--inner_temperature {T}')
                 #new_argv.append(f'--conditional_teacher')
-                if alpha==-1:
-                     continue
-                else: 
-                    new_argv.append(f'--alpha {alpha} ')
+                new_argv.append(f'--alpha {alpha} ')
                     #new_argv.append(f'--beta {beta} ')
                 new_argv.append(f'--buffer_size {b} ')
 
-                if seed==11: 
-                       new_argv.append('--checkpoints_stud')
+                #if seed==11: 
+                #       new_argv.append('--checkpoints_stud')
                 #if alpha==1:
                 #    new_argv.append(f'--teacher_off')
                 #new_argv.append(f"--distil_proportion {p}")

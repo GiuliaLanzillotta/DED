@@ -8,13 +8,10 @@ The CIFAR-100 dataset consists of 60000 32x32 colour images in 100 classes, with
 
 example commands: 
 
-python scripts/cifar100_kerd.py  --block_gradient --lamdafk 1  --cka  --seed 11  --gpus_id 0 --buffer_size 1200 --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
+python scripts/cifar100_kerd.py --block_gradient --symmetric --outer_temperature 1  --lamdafk 100 --lamdafr 0.01  --cka --teacher_targets  --seed 11  --gpus_id 4 --buffer_size 12000 --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
 
 
 Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
-
-We here experiment with a paradigm of using the teacher 'on-demand', i.e. 
-when the teacher is good enough according to some pre-defined metric. 
 
 """
 
@@ -157,15 +154,21 @@ def parse_args(buffer=False):
     parser.add_argument('--optim_cosineanneal', default=True, action='store_true', help='Enabling cosine annealing of learning rate..')
     parser.add_argument('--n_epochs', type=int, default=200, help='Number of epochs.')
     parser.add_argument('--n_epochs_stud', type=int, default=200, help='Number of student epochs.')
-    parser.add_argument('--batch_size', type=int, default = 128, help='Batch size.')
+    parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
     parser.add_argument('--validate_subset', type=int, default=-1, 
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
-    parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+    parser.add_argument('--inner_temperature', type=float, default=1., help='Temperature of the to apply to the kernel.')
+    parser.add_argument('--outer_temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
+
     parser.add_argument('--fkd', action='store_true', help='Switching to feature kernel distillation.')
     parser.add_argument('--cka', action='store_true', help='Switching to cka- kernel distillation.')
+    parser.add_argument('--fd', action='store_true', help='Switching to feature distillation.')
     parser.add_argument('--block_gradient', action='store_true', help='No gradient backpropagated from the classification head to the backbone.')
     parser.add_argument('--lamdafr', type=float, default=0.01, help='(only for fkd) Feature regulariser strength.')
     parser.add_argument('--lamdafk', type=float, default=300, help='(only for fkd) Feature kernel loss strength.')
+    parser.add_argument('--teacher_targets', action='store_true', help='Whether to use the teacher outputs as targets for the last layer training.')
+    parser.add_argument('--symmetric', action='store_true', help='Whether to apply temperature scaling to both teacher and student.')
+
 
     add_management_args(parser)
     add_rehearsal_args(parser)
@@ -366,9 +369,10 @@ optimizer, scheduler, warmup_scheduler = setup_optimizerNscheduler(args, student
 
 
 average_magnitude=0
-teacher_predictions_results = {} # dictionary where to store the teacher predictions check results for every batch
+teacher_kernels = {} # dictionary where to store the teacher predictions check results for every batch
 alpha = args.alpha
-T = args.temperature
+Tin = args.inner_temperature
+Tout = args.outer_temperature
 for e in range(args.n_epochs_stud):
         if args.debug_mode and e > 3: # only 3 batches in debug mode
                 break
@@ -380,44 +384,84 @@ for e in range(args.n_epochs_stud):
                        break
                 inputs, labels = data
                 inputs, labels = inputs.to(device), labels.to(device)
-                
 
                 with torch.no_grad(): 
                        phi_t = teacher.get_features(inputs)
                        logits_t = teacher.forward_head(phi_t)
                 
+                if not args.fd:
+                        if i not in teacher_kernels.keys():
+                                        with torch.no_grad():
+                                                if args.fkd: phi_t = torch.div(phi_t, phi_t.norm(dim=1).view(-1,1))
+                                                ker_t = torch.matmul(phi_t, phi_t.T)
+                                                if Tin!=1: #filtering
+                                                        ker_t = ker_t/torch.linalg.matrix_norm(ker_t,2) # avoiding explosions
+                                                        D, Q = torch.linalg.eigh(ker_t)
+                                                        ker_t = Q @ torch.diag(torch.pow(D, Tin)).to(D.device) @ Q.T 
+                                        teacher_kernels[i] = ker_t
+                                        
 
-                optimizer.zero_grad()
+                        else: ker_t = teacher_kernels[i]
+
+
 
                 phi_s = student.get_features(inputs)
                 if args.fkd:
-                       features_loss, kernel_loss, features_norm = fkd(phi_s, phi_t, lamda_fk=args.lamdafk, lamda_fr=0)
-                elif args.cka: 
-                       features_loss = cka_loss(phi_s, phi_t)
+                       phi_s = torch.div(phi_s, phi_s.norm(dim=1).view(-1,1))
+                       ker_s = torch.matmul(phi_s, phi_s.T)
+                       features_loss = F.mse_loss(ker_s, ker_t)
+                elif args.cka:
+                        ker_s = torch.matmul(phi_s, phi_s.T)
+                        if args.symmetric and Tin!=1: 
+                                ker_s = ker_s/torch.linalg.matrix_norm(ker_s,2) # avoiding explosions
+                                D, Q = torch.linalg.eigh(ker_s)
+                                ker_s = Q @ torch.diag(torch.pow(D, Tin)).to(D.device) @ Q.T 
+                        features_loss = cka_loss(ker_s, ker_t)
+                elif args.fd: 
+                        features_loss = features_mse(phi_s, phi_t)
 
-                if args.block_gradient: head_inputs = phi_s.clone().detach()
-                else: head_inputs = phi_s
-                logits_s = student.forward_head(head_inputs)
-                
-                _, pred = torch.max(logits_s.data, 1)
-                _, pred_t = torch.max(logits_t.data, 1)
-                correct += torch.sum(pred == labels).item()
-                agreement += torch.sum(pred == pred_t).item()
-                total += labels.shape[0]
+                feature_norm = torch.norm(phi_s)
 
+                        
+
+                # if args.block_gradient: 
+                #         head_inputs = phi_s.clone().detach()
+                        
+                #else: head_inputs = phi_s
+                logits_s = student.forward_head(phi_s)
                 
-                if args.MSE: 
-                       if LOGITS_MAGNITUDE_TEACHER == 1: # estimate during the first epoch
-                                average_non_max = (logits_t.sum(dim=1) - logits_t.max(dim=1)[0])/9 # average over the non-max outputs
-                                average_magnitude += (logits_t.max(dim=1)[0] - average_non_max).sum(dim=0) 
-                       labels_loss = F.mse_loss(logits_s, F.one_hot(labels, num_classes=100).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
+        
+                if not args.teacher_targets:
+                        if args.MSE: 
+                                if LOGITS_MAGNITUDE_TEACHER == 1: # estimate during the first epoch
+                                                average_non_max = (logits_t.sum(dim=1) - logits_t.max(dim=1)[0])/9 # average over the non-max outputs
+                                                average_magnitude += (logits_t.max(dim=1)[0] - average_non_max).sum(dim=0) 
+                                labels_loss = F.mse_loss(logits_s, F.one_hot(labels, num_classes=100).to(torch.float) * LOGITS_MAGNITUDE_TEACHER, reduction='none').mean(dim=1)  # Bobby's correction
+                        else:
+                                labels_loss = F.cross_entropy(logits_s, labels, reduction='none')
+
+                else: 
+                        if i==0: print("Using teacher targets.")
+                        if args.MSE: labels_loss = F.mse_loss(logits_s, logits_t, reduction='none').mean(dim=1)
+                        else: labels_loss = F.kl_div(input=F.log_softmax(logits_s, dim=1), target=F.softmax(logits_t, dim=1), log_target=False, reduction='none').sum(dim=1) 
+
+                if args.block_gradient: 
+                        loss = args.lamdafk*features_loss + args.lamdafr*feature_norm
                 else:
-                      labels_loss = F.cross_entropy(logits_s, labels, reduction='none')
+                        loss = args.lamdafk*features_loss + labels_loss.mean() + args.lamdafr*feature_norm
                 
-                loss = args.lamdafk+features_loss + labels_loss.mean()
 
                 loss.backward()
                 optimizer.step()
+                optimizer.zero_grad()
+                
+                with torch.no_grad():
+                        _, pred = torch.max(logits_s.data, 1)
+                        _, pred_t = torch.max(logits_t.data, 1)
+                        correct += torch.sum(pred == labels).item()
+                        agreement += torch.sum(pred == pred_t).item()
+                        total += labels.shape[0]
+
                 assert not math.isnan(loss)
                 progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
                 avg_loss += loss*(labels.shape[0])
@@ -456,14 +500,88 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka}
-        
-        if args.fkd:
-                df['kernel_loss'] = kernel_loss
-                df['features_norm'] = features_norm
+        df['feature_loss'] = features_loss
+        df['labels_loss'] = labels_loss.mean()
 
 
 
         wandb.log(df)
+
+if args.block_gradient: 
+        # retraining the head at the end
+        print("Backbone training completed. Training the head. ")
+        # freeze backbone 
+        for (n,m) in student.named_children():
+                if n != "fc":
+                        print("Freezing ",n)
+                        for p in m.parameters():
+                                p.requires_grad = False
+                else: 
+                        print("Resetting ",n)
+                        m.reset_parameters()
+        # reset optimizer 
+        optimizer = torch.optim.SGD([p for p in student.parameters() if p.requires_grad], 
+                                lr=0.1, 
+                                weight_decay=0, 
+                                momentum=0,
+                                nesterov=False)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+
+        # training 
+        for e in range(30):
+                avg_loss = 0.0
+                correct, total, agreement, function_distance = 0.0, 0.0, 0.0, 0.0
+                for i, data in enumerate(buffer_loader):
+
+                        inputs, labels = data
+                        inputs, labels = inputs.to(device), labels.to(device)
+                        with torch.no_grad(): 
+                                logits = teacher(inputs)
+                                phi_s = student.get_features(inputs)
+                        
+                        outputs = student.forward_head(phi_s)
+                        labels_loss = F.cross_entropy(outputs, labels, reduction='none')
+                        logits_loss = F.kl_div(input=F.log_softmax(outputs, dim=1), target=F.softmax(logits, dim=1), log_target=False, reduction='none').sum(dim=1) 
+                        
+                        if args.teacher_targets: 
+                                loss = logits_loss.mean()
+                        else: loss =labels_loss.mean()
+
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                        assert not math.isnan(loss)
+
+                        _, pred = torch.max(outputs.data, 1)
+                        _, pred_t = torch.max(logits.data, 1)
+                        correct += torch.sum(pred == labels).item()
+                        agreement += torch.sum(pred == pred_t).item()
+                        total += labels.shape[0]
+
+                        progress_bar.prog(i, len(buffer_loader), e, 'Student', loss.item())
+                        avg_loss += loss*(labels.shape[0])
+                
+                avg_loss = avg_loss/total
+                if scheduler is not None:
+                        scheduler.step()
+                
+                train_acc = (correct/total) * 100
+                train_agreement = (agreement/total) * 100      
+                # measure distance in parameter space between the teacher and student models 
+                val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, device, num_samples=args.validate_subset)
+
+                print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
+                print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
+                
+                df = {'epoch_loss_S':avg_loss,
+                'epoch_train_acc_S':train_acc,
+                'epoch_train_agreement':train_agreement,
+                'epoch_val_acc_S':val_acc,
+                'epoch_val_agreement':val_agreement}
+
+                wandb.log(df)
+
+        experiment_log['with_linear_retraining'] = True
         
 print("Training completed. Full evaluation and logging...")
 end = time.time()
@@ -475,7 +593,7 @@ if args.checkpoints_stud:
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'resnet18-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=f'resnet18-student-cka-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
 
 cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
 cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
@@ -497,7 +615,6 @@ experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
 if not args.nowand:
         wandb.finish()
-
 
 # dumping everything into a log file
 path = base_path() + "results" + "/" + "cifar100" + "/" + f"resnet18" 
