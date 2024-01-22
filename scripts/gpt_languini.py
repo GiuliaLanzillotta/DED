@@ -11,10 +11,10 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=3 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=34231 scripts/gpt_languini.py mini\
-  --alpha 0 \
+CUDA_VISIBLE_DEVICES=6 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=42321 scripts/gpt_languini.py mini\
+  --alpha 1 \
   --train_batch_size 128 \
-  --max_train_steps 300000 \
+  --max_train_steps 10000 \
   --gradient_accumulation_steps 16 \
   --tokens_per_second 16618 \
   --log_terminal_every 100 \
@@ -35,9 +35,10 @@ import torch.multiprocessing as mp
 
 
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(internal_path + '/languini-kitchen/languini/')
+sys.path.append(internal_path + '/languini-kitchen/')
+sys.path.append(internal_path + '/utils/')
 sys.path.append(internal_path)
-sys.path.append(internal_path + '/languini-kitchen/languini')
-
 
 from languini.train_lib import lm_trainer
 from languini.train_lib import lr_schedules
@@ -51,13 +52,12 @@ from languini.common_lib.parallel_utils import LOCAL_RANK, WORLD_RANK, WORLD_SIZ
 import languini.projects.gpt.configs as configs
 from languini.projects.gpt.model import Model
 
-TEACHER_CONFIG_NAME = "medium"
+TEACHER_CONFIG_NAME = "mini"
 EXPERIMENT_NOTE = 'gpt_languini'
 
 def run(config, logger, teacher_config=None):
     c = config
 
-    mprint("Inside run printing ...")
     #if teacher_config is None: teacher_config=c 
     
     mprint(f"{c.n_workers} workers detected. Using DistributedDataParallel. Local rank: {LOCAL_RANK}. Device: {c.device}")
