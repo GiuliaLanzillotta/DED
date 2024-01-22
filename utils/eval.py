@@ -293,10 +293,12 @@ def evaluate_CKAandFA_teacher(teacher, student, loader, device, batches=10):
        status = student.training
        student.eval()
        teacher.eval() # shouldn't be needed
-       FT = collect_features(loader, teacher, device, batches)
-       FS = collect_features(loader, student, device, batches)
-
-       FA = features_alignment(FT, FS).cpu().item()
+       FT = collect_features(loader, teacher, device, num_batches=batches)
+       FS = collect_features(loader, student, device, num_batches=batches)
+       
+       if FT.shape[1]==FS.shape[1]: 
+              FA = features_alignment(FT, FS).cpu().item()
+       else: FA = -1
 
        KT = compute_empirical_kernel_from_features(FT)
        KS = compute_empirical_kernel_from_features(FS)

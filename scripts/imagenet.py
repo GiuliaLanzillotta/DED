@@ -13,6 +13,7 @@ python scripts/imagenet.py --alpha 1 --gpus_id 0 --buffer_size 30000 --distillat
 
 """
 
+from copy import deepcopy
 import importlib
 import json
 import math
@@ -320,6 +321,9 @@ if args.distributed=='dp':
 student.to(device)
 student.train()
 
+student_init = deepcopy(student)
+student_init.eval()
+
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
 if args.distillation_type == 'inner':
@@ -400,6 +404,7 @@ for e in range(args.n_epochs_stud):
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, device, num_samples=args.validate_subset)
 
         fa, cka = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=10)
+        fa_init, cka_init = evaluate_CKAandFA_teacher(student_init, student, buffer_loader, device, batches=10)
 
         print('\nTrain accuracy : {} %'.format(round(train_acc, 2)), file=sys.stderr)
         print('\Val accuracy : {} %'.format(round(val_acc, 2)), file=sys.stderr)
@@ -411,7 +416,9 @@ for e in range(args.n_epochs_stud):
                 'epoch_val_acc_S':val_acc,
                 'epoch_val_agreement':val_agreement,
                 'epoch_cka_train':cka,
-                'epoch_fa_train':fa
+                'epoch_fa_train':fa,
+                'epoch_cka_train_init':cka_init,
+                'epoch_fa_train_init':fa_init,
                 }
         wandb.log(df)
 
@@ -432,10 +439,16 @@ fa_train, cka_train = evaluate_CKAandFA_teacher(teacher, student, buffer_loader,
 fa_val, cka_val = evaluate_CKAandFA_teacher(teacher, student, val_loader, device, batches=10)
 
 
+fa_train_init, cka_train_init = evaluate_CKAandFA_teacher(student_init, student, buffer_loader, device, batches=20)
+fa_val_init, cka_val_init = evaluate_CKAandFA_teacher(student_init, student, val_loader, device, batches=10)
+
+
 experiment_log['final_cka_train'] = cka_train
 experiment_log['final_cka_val'] = cka_val
 experiment_log['final_fa_train'] = fa_train
 experiment_log['final_fa_val'] = fa_val
+experiment_log['final_fa_train_init'] = fa_train_init
+experiment_log['final_fa_val_init'] = fa_val_init
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 

@@ -11,7 +11,7 @@ example commands:
 
 python scripts/cifar5m.py --seed 11 --temper_labels --temperature 20 --alpha 1 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-TL --wandb_project DataEfficientDistillation
 python scripts/cifar5m.py --seed 11 --fkd --alpha 0.003 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18 --wandb_project DataEfficientDistillation
-
+python scripts/cifar5m.py --seed 11 --temperature 1 --alpha 1 --gpus_id 3 --buffer_size 12000 --lr 0.01 --optim_mom 0.8 --checkpoints  --teacher_network resnet18 --student_network resnet50 --batch_size 128 --checkpoints --notes cifar5m-distillation-resnet50-v2 --wandb_project DataEfficientDistillation
 python scripts/cifar5m.py --seed 11 --temperature 20 --alpha 0 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-NTK --wandb_project DataEfficientDistillation
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
@@ -20,6 +20,7 @@ Mobilenets: compact, no-residuals CNNs https://arxiv.org/pdf/1704.04861.pdf
 
 """
 
+from copy import deepcopy
 import importlib
 import json
 import math
@@ -71,8 +72,8 @@ except ImportError:
 
 LOGITS_MAGNITUDE_TEACHER = 1.0 
 AUGMENT = True
-TEACHER_NETWORK = 'CNN'
-STUDENT_NETWORK = 'CNN'
+TEACHER_NETWORK = 'resnet18'
+STUDENT_NETWORK = 'resnet18'
 
 def setup_optimizerNscheduler(args, model, stud=False):
         if stud: epochs = args.n_epochs_stud
@@ -110,13 +111,13 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     if is_best:
         shutil.copyfile(path+filename, path+'model_best.ckpt')
 
-def load_checkpoint(best=False, filename='checkpoint.pth.tar', distributed=False):
+def load_checkpoint(device, best=False, filename='checkpoint.pth.tar', distributed=False):
     path = base_path() + "chkpts" + "/" + "cifar5m" + "/" + f"{TEACHER_NETWORK}/"
     if best: filepath = path + 'model_best.ckpt'
     else: filepath = path + filename
     if os.path.exists(filepath):
           print(f"Loading existing checkpoint {filepath}")
-          checkpoint = torch.load(filepath)
+          checkpoint = torch.load(filepath, map_location=device)
           return checkpoint
     return None 
 
@@ -137,11 +138,12 @@ def parse_args(buffer=False):
     parser.add_argument('--n_epochs', type=int, default=30, help='Number of epochs.')
     parser.add_argument('--n_epochs_stud', type=int, default=30, help='Number of student epochs.')
     parser.add_argument('--batch_size', type=int, default = 256, help='Batch size.')
-    parser.add_argument('--validate_subset', type=int, default=-1, 
-                        help='If positive, allows validating on random subsets of the validation dataset during training.')
+    parser.add_argument('--validate_subset', type=int, default=-1, help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
     parser.add_argument('--temper_labels', action='store_true', help='Whether to use temperature in labels training (alpha>0)')
     parser.add_argument('--asymmetric_temperature', action='store_true', help='Temperature is only added to the teacher distribution.')
+    parser.add_argument('--student_network', type=str, required=False, default="CNN", choices=["resnet18","CNN","mnet","resnet50"],help='Which network to use.')
+    parser.add_argument('--teacher_network', type=str, required=False, default="CNN", choices=["resnet18","CNN"],help='Which network to use.')
 
 
     add_management_args(parser)
@@ -180,7 +182,8 @@ all_indices = set(range(len(C5m_train)))
 random_indices = np.random.choice(list(all_indices), size=60000, replace=False)
 teacher_data = Subset(C5m_train, random_indices)
 C = args.C
-
+STUDENT_NETWORK = args.student_network
+TEACHER_NETWORK = args.teacher_network
 # initialising the model
 #teacher = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
 if TEACHER_NETWORK=="resnet18": teacher = resnet18(num_classes=10)
@@ -231,7 +234,7 @@ if not args.pretrained:
 
 
         if args.checkpoints: # resuming training from the last point
-                checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, 
+                checkpoint = load_checkpoint(device=device, best=False, filename=CHKPT_NAME, 
                                              distributed=not args.distributed=='no') 
                 if checkpoint: 
                         teacher.load_state_dict(checkpoint['state_dict'])
@@ -298,7 +301,7 @@ if not args.pretrained:
                 
         final_val_acc_D = val_acc
 else: 
-        checkpoint = load_checkpoint(best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
+        checkpoint = load_checkpoint(device=device, best=False, filename=CHKPT_NAME, distributed=not args.distributed=='no') #TODO: switch best off
         teacher.load_state_dict(checkpoint['state_dict'])
         teacher.to(device)
         final_val_acc_D = checkpoint['best_acc']
@@ -339,6 +342,7 @@ start = time.time()
 #student = CNN(c=C,num_classes=10,use_batch_norm=True) # adjusting for CIFAR 
 if STUDENT_NETWORK=="resnet18": student = resnet18(num_classes=10)
 elif STUDENT_NETWORK=="CNN": student = CNN(c=C, num_classes=10, use_batch_norm=True)
+elif STUDENT_NETWORK=="resnet50": student = resnet50(num_classes=10)
 model_size = count_parameters(student)
 print(f"Student {STUDENT_NETWORK} created with {model_size} parameters.")
 
@@ -347,6 +351,9 @@ if args.distributed=='dp':
       student = torch.nn.DataParallel(student, device_ids=args.gpus_id).to(device)
 student.to(device)
 student.train()
+
+student_init = deepcopy(student)
+student_init.eval() # only needed for evaluation purposes
 
 optimizer, scheduler = setup_optimizerNscheduler(args, student, stud=True)
 
@@ -433,9 +440,10 @@ for e in range(args.n_epochs_stud):
         val_acc, val_agreement = validation_and_agreement(student, teacher, val_loader, 
                                                         device, num_samples=args.validate_subset)
         
-        cka = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=10)
-        ntk_cka = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
-                                                 num_batches=7, savedir=ntk_savedir, load=e>0)
+        fa, cka = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=10)
+        fa_init, cka_init = evaluate_CKAandFA_teacher(student_init, student, buffer_loader, device, batches=10)
+        # ntk_cka = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
+        #                                          num_batches=7, savedir=ntk_savedir, load=e>0)
         # ntk_cka = evaluate_NTK_alignment_teacher(teacher, student, ntk_savedir, buffer_loader, 
         #                         subset=5000, names=(teacher_name, student_name))
 
@@ -449,7 +457,10 @@ for e in range(args.n_epochs_stud):
               'epoch_val_acc_S':val_acc,
               'epoch_val_agreement':val_agreement,
               'epoch_cka_train':cka,
-              'epoch_ntk_alignment_train':ntk_cka
+              'epoch_fa_train':fa,
+              'epoch_cka_train_init':cka_init,
+              'epoch_fa_train_init':fa_init,
+              #'epoch_ntk_alignment_train':ntk_cka
               #'epoch_fa_train':fa
         }
         
@@ -460,6 +471,7 @@ for e in range(args.n_epochs_stud):
 print("Training completed. Full evaluation and logging...")
 end = time.time()
 
+chkpt_filename=f'{STUDENT_NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}-{args.temperature}.ckpt'
 if args.checkpoints_stud: 
                 save_checkpoint({
                 'epoch': e + 1,
@@ -467,23 +479,32 @@ if args.checkpoints_stud:
                 'best_acc': val_acc,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-                }, False, filename=f'{STUDENT_NETWORK}-student-{args.seed}-{args.buffer_size}-{args.alpha}.ckpt')
+                }, False, filename=chkpt_filename)
 
 
-cka_train = evaluate_CKA_teacher(teacher, student, buffer_loader, device, batches=20)
-cka_val = evaluate_CKA_teacher(teacher, student, val_loader, device, batches=10)
-ntk_cka_train = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
-                                               num_batches=7, savedir=ntk_savedir, load=True)
-ntk_cka_val = evaluate_NTK_alignment_teacher(teacher, student, val_loader, device, num_batches=7, 
-                                             savedir=None, load=False)
+
+fa_train, cka_train = evaluate_CKAandFA_teacher(teacher, student, buffer_loader, device, batches=20)
+fa_val, cka_val = evaluate_CKAandFA_teacher(teacher, student, val_loader, device, batches=10)
+
+
+fa_train_init, cka_train_init = evaluate_CKAandFA_teacher(student_init, student, buffer_loader, device, batches=20)
+fa_val_init, cka_val_init = evaluate_CKAandFA_teacher(student_init, student, val_loader, device, batches=10)
+# ntk_cka_train = evaluate_NTK_alignment_teacher(teacher, student, buffer_loader, device, 
+#                                                num_batches=7, savedir=ntk_savedir, load=True)
+# ntk_cka_val = evaluate_NTK_alignment_teacher(teacher, student, val_loader, device, num_batches=7, 
+#                                              savedir=None, load=False)
 
 
 experiment_log['final_cka_train'] = cka_train
 experiment_log['final_cka_val'] = cka_val
-experiment_log['final_ntk_train'] = ntk_cka_train
-experiment_log['final_ntk_val'] = ntk_cka_val
-#experiment_log['final_fa_train'] = fa_train
-#experiment_log['final_fa_val'] = fa_val
+experiment_log['final_cka_train_init'] = cka_train_init
+experiment_log['final_cka_val_init'] = cka_val_init
+#experiment_log['final_ntk_train'] = ntk_cka_train
+#experiment_log['final_ntk_val'] = ntk_cka_val
+experiment_log['final_fa_train'] = fa_train
+experiment_log['final_fa_val'] = fa_val
+experiment_log['final_fa_train_init'] = fa_train_init
+experiment_log['final_fa_val_init'] = fa_val_init
 experiment_log['buffer_train_time'] = end-start
 experiment_log['final_train_acc_S'] = train_acc
 
@@ -497,13 +518,12 @@ experiment_log['final_val_agreement'] = val_agreement
 experiment_log['final_val_function_distance'] = val_function_distance
 experiment_log['final_distance_teacher_student'] = teacher_student_distance
 
-
 if not args.nowand:
         wandb.finish()
 
 
 # dumping everything into a log file
-path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}" 
+path = base_path() + "results" + "/" + "cifar5m" + "/" + f"{STUDENT_NETWORK}_v2" 
 if not os.path.exists(path): os.makedirs(path)
-with open(path+ "/logs_ntk.txt", 'a') as f:
+with open(path+ "/logs.txt", 'a') as f:
         f.write(json.dumps(experiment_log) + '\n')

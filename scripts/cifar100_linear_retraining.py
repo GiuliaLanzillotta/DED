@@ -49,6 +49,7 @@ from torchvision.datasets import ImageNet, ImageFolder, CIFAR10
 from torchvision.models import efficientnet_v2_s, resnet50, ResNet50_Weights, googlenet, efficientnet_b0, mobilenet_v3_large
 import torchvision.transforms as transforms
 from torch.nn.utils import parameters_to_vector
+from sklearn.linear_model import LogisticRegression
 
 
 import shutil
