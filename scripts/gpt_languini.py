@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=6 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --ma
   --log_metrics_every 100 \
   --eval_every 100 \
   --log_grads_every -1 \
-  --log_ckpt_every -1 \
+  --log_ckpt_every 2000 \
   --seed 55 \
   --temperature 1
 
@@ -53,7 +53,7 @@ import languini.projects.gpt.configs as configs
 from languini.projects.gpt.model import Model
 
 TEACHER_CONFIG_NAME = "mini"
-EXPERIMENT_NOTE = 'gpt_languini'
+EXPERIMENT_NOTE = 'gpt_languini' # change this to change the experiment name
 
 def run(config, logger, teacher_config=None):
     c = config
