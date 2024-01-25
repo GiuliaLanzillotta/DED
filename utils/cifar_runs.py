@@ -4,7 +4,7 @@ dividing the GPUs equally between them
 example commands: 
 
 
-python utils/cifar_runs.py python scripts/cifar5m.py  --teacher_network CNN --student_network resnet18 --batch_size 128 --checkpoints --notes cifar5m-distillation-resnet18-v2 --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py  --teacher_network resnet18 --student_network CNN --batch_size 128 --checkpoints --notes cifar5m-distillation-CNN-v2 --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar5m_zeroloss.py  --MSE --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-zero_loss --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar5m_SSL.py --distillation_type vanilla --batch_size 128 --checkpoints --notes cifar5m-distillation-SSL --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar10_mixed.py --reset_optim --batch_size 128  --checkpoints --notes cifar10-mixeddistillation-all --wandb_project DataEfficientDistillation
@@ -32,7 +32,7 @@ SEEDS = [11, 13, 21, 33, 55]#,5,138,228,196,118
 #SEEDS=[11]
 #BUFFER_SIZES = [90000, 120000, 200000, 600000] 
 #BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000]
-BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000, 90000, 120000, 200000, 600000]
+BUFFER_SIZES = [600000]
 #BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000]
 TEMPERATURES = [0.1, 1, 3, 5, 10, 20, 100, 10000]
 #TEMPERATURES = [0.1, 0.33, 0.5, 1.0, 2.0]

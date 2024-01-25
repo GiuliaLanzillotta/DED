@@ -11,8 +11,8 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=6 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=42321 scripts/gpt_languini.py mini\
-  --alpha 1 \
+CUDA_VISIBLE_DEVICES=3 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=12341 scripts/gpt_languini.py mini\
+  --alpha 0 \
   --train_batch_size 128 \
   --max_train_steps 10000 \
   --gradient_accumulation_steps 16 \
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=6 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --ma
   --log_grads_every -1 \
   --log_ckpt_every 2000 \
   --seed 55 \
-  --temperature 1
+  --temperature 2
 
 """
 
@@ -32,6 +32,7 @@ import os
 import sys
 import torch
 import torch.multiprocessing as mp
+import numpy as np
 
 
 internal_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -135,6 +136,12 @@ def run(config, logger, teacher_config=None):
                                       max_steps=c.decay_steps,
                                       decay_after=False)
 
+    #TODO: incorporate into dataset loading
+    path = "./dataset_utils/languini_word_frequency.npy"
+    mprint("Loading class frequency vector")
+    cf = np.load(path)
+
+
     ## Setup Trainer
     trainer = lm_trainer.LMDistilTrainer(config=c,
                                         config_t=teacher_config,
@@ -144,7 +151,8 @@ def run(config, logger, teacher_config=None):
                                         opt=opt,
                                         scheduler=scheduler,
                                         train_batches=train_ds,
-                                        eval_batches=eval_ds)
+                                        eval_batches=eval_ds,
+                                        class_frequencies=cf)
 
     mprint("Begin training ... ")
     trainer.train()
