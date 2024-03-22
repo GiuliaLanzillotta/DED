@@ -12,6 +12,8 @@ python scripts/cifar100.py  --seed 13 --alpha 0 --gpus_id 3 --temperature 10 --b
 python scripts/cifar100.py  --fkd --test_mode 1 --seed 11 --alpha 0.005 --lamdafr 0.001 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-distillation --wandb_project DataEfficientDistillation
 python scripts/cifar100.py --alpha 0 --buffer_size 12000 --gpus_id 0 --temperature 20 --seed 11 --batch_size 128  --label_smoothing --checkpoints --notes cifar100-resnet18-distillation-labelsmoothing --wandb_project DataEfficientDistillation
 
+python scripts/cifar100.py --alpha 0.91 --buffer_size 12000 --gpus_id 7 --temperature 20 --seed 11 --batch_size 128  --randomhead --checkpoints --notes cifar100-resnet18-distillation-randomhead --wandb_project DataEfficientDistillation
+
 
 Teacher recipe: https://huggingface.co/edadaltocg/resnet18_cifar100
 
@@ -164,7 +166,7 @@ def parse_args(buffer=False):
                         help='If positive, allows validating on random subsets of the validation dataset during training.')
     parser.add_argument('--temperature', type=float, default=1., help='Temperature (prop to entropy) of the teacher outputs - only used with KL.')
     parser.add_argument('--label_smoothing', action='store_true', help='Using manually designed teacher through label smoothing.')
-
+    parser.add_argument('--randomhead', default=False, action='store_true',help='If provided, the teacher networks head is re-initialised to random.')
     add_management_args(parser)
     add_rehearsal_args(parser)
 
@@ -179,6 +181,7 @@ def parse_args(buffer=False):
     parser.add_argument('--K', type=int, default=3, help='Number of predictions to use from the teacher (topK).')
     parser.add_argument('--N_BLOCKS', type=int, default=1, help='Number of layer blocks to distill from. The layers are selected in a reverse ordering from the output to input.')
     parser.add_argument('--gamma', type=float, default=1.0, help='The mixing weight for mixed inner distillation')
+
     args = parser.parse_args()
 
     return args
@@ -198,7 +201,6 @@ C100_train, C100_val = load_dataset('cifar100', augment=AUGMENT)
 
 # initialising the model
 teacher = resnet18(num_classes=100)
-
 params = count_parameters(teacher)
 print(f"Teacher created with {params} parameters")
 
@@ -330,6 +332,13 @@ if not args.nowand: wandb.log(df)
 
 
 print(f"Randomly drawing {args.buffer_size} samples from Cifar100 ")
+
+if args.randomhead:     
+        for (n,m) in teacher.named_children():
+                if n == "fc":
+                        print("Resetting ",n)
+                        m.reset_parameters()
+
 teacher.eval() # set the main model to evaluation
 
 random_indices = np.random.choice(list(range(len(C100_train))), size=args.buffer_size, replace=False)

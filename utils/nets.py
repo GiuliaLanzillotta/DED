@@ -4,7 +4,7 @@ import torch.nn as nn
 import numpy as np
 from torch import Tensor
 import torch.nn.functional as F
-from torchvision.models import efficientnet_v2_s, resnet50, googlenet, efficientnet_b0, MobileNetV3
+from torchvision.models import efficientnet_v2_s, resnet50, googlenet, efficientnet_b0, MobileNetV3, VisionTransformer
 import torchvision
 from types import MethodType
 
@@ -391,6 +391,21 @@ def feature_wrapper(model):
      if isinstance(model, CNN):
           return model
      
+     if isinstance(model, VisionTransformer):
+        def get_features(self, x):
+            # Reshape and permute the input tensor
+            x = self._process_input(x)
+            n = x.shape[0]
+            # Expand the class token to the full batch
+            batch_class_token = self.class_token.expand(n, -1, -1)
+            x = torch.cat([batch_class_token, x], dim=1)
+            x = self.encoder(x)
+            # Classifier "token" as used by standard language architectures
+            x = x[:, 0]
+            return x
+        model.get_features = MethodType(get_features, model)
+        return model
+     
      raise NotImplementedError("the selected model has no 'get_features' method")
 
 
@@ -417,5 +432,12 @@ def head_wrapper(model):
      
      if isinstance(model, CNN):
           return model
+     
+     if isinstance(model, VisionTransformer):
+        def forward_head(self, x):
+               x = self.heads(x)
+               return x
+        model.forward_head = MethodType(forward_head, model)
+        return model
      
      raise NotImplementedError("the selected model has no 'forward_head' method")

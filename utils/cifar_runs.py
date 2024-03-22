@@ -19,6 +19,15 @@ python utils/cifar_runs.py python scripts/cifar5m.py --batch_size 128  --checkpo
 python utils/cifar_runs.py python scripts/cifar100_kerd.py --block_gradient --symmetric --outer_temperature 1 --lamdafk 100 --lamdafr 0.01  --cka --teacher_targets   --distillation_type vanilla   --checkpoints --notes cifar100-resnet18-distillation-CKA --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar100_linear_retraining.py  --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar100-resnet18-linretraining --wandb_project DataEfficientDistillation
 python utils/cifar_runs.py python scripts/cifar100.py --batch_size 128  --label_smoothing --checkpoints --notes cifar100-resnet18-distillation-labelsmoothing --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py --teacher_network resnet18 --student_network CNN --alpha 0.9 --batch_size 128  --label_smoothing --checkpoints --notes cifar5m-CNN-distillation-labelsmoothing --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar100.py --batch_size 128  --randomhead --checkpoints --notes cifar100-resnet18-distillation-randomhead --wandb_project DataEfficientDistillation
+
+python utils/cifar_runs.py python scripts/cifar5m.py  --augmentations_off --teacher_network CNN --student_network CNN --batch_size 128 --checkpoints --notes cifar5m-distillation-CNN-noaugmentations --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py  --augmentations_off --teacher_network resnet18 --student_network CNN --batch_size 128 --checkpoints --notes cifar5m-distillation-CNN-RN18-noaugmentations --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/cifar5m.py --teacher_network resnet18 --student_network resnet18 --batch_size 128  --randomhead --checkpoints --notes cifar5m-resnet18-distillation-randomhead --wandb_project DataEfficientDistillation
+
+python utils/cifar_runs.py python scripts/transfer.py --pretrained --notes transfer-pet --wandb_project DataEfficientDistillation
+python utils/cifar_runs.py python scripts/transfer.py --lowdatateacher --data food --n_epochs 40 --n_epochs_stud 40 --lr 0.1  --pretrained  --notes transfer-food --wandb_project DataEfficientDistillation
 
 
 """
@@ -32,14 +41,15 @@ SEEDS = [11, 13, 21, 33, 55]#,5,138,228,196,118
 #SEEDS=[11]
 #BUFFER_SIZES = [90000, 120000, 200000, 600000] 
 #BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000]
-BUFFER_SIZES = [600000]
-#BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000]
+#BUFFER_SIZES = [1200000]
+BUFFER_SIZES = [1200, 6000, 12000, 24000, 48000, 60000, 90000, 120000]
+BUFFER_SIZES = [1500, 3000, 7500, 15000, 22500, 30000]
 TEMPERATURES = [0.1, 1, 3, 5, 10, 20, 100, 10000]
 #TEMPERATURES = [0.1, 0.33, 0.5, 1.0, 2.0]
 
-PARALLEL_ORDER = 4
-#GPUIDS = [0,1,2,3,4,5,6,7]
-GPUIDS = [4,5,6,7]
+PARALLEL_ORDER = 2
+GPUIDS = [3,4]
+#GPUIDS = [4,5,6,7]
 def crange(start, end, modulo):
     # implementing circular range
     if start > end:
@@ -57,12 +67,12 @@ all_commands=[]
 gpu_count=0
 job_count=0
 
-for b in BUFFER_SIZES:
-    for seed in SEEDS:
+for seed in SEEDS:
+    for T in TEMPERATURES:
         for alpha in [0.0, 1.0]:
-            for T in TEMPERATURES:
-            #for k in K: # for topK distillation
-            #for b in N_BLOCKS: # inner block distillation
+            for b in BUFFER_SIZES:
+                #for k in K: # for topK distillation
+                #for b in N_BLOCKS: # inner block distillation
                 
                 if alpha==1.0 and T!=1:
                    continue

@@ -11,19 +11,20 @@ Command:
 
 48h: GPT medium, bsz 256, seqlen 512 -> 16618 tokens per second, 21908 steps, 32 gradient accumulation steps
 
-CUDA_VISIBLE_DEVICES=3 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=1 --master_addr=localhost --master_port=12341 scripts/gpt_languini.py mini\
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nnodes=1 --node_rank=0 --nproc_per_node=2 --master_addr=localhost --master_port=10102 scripts/gpt_languini.py medium\
   --alpha 0 \
-  --train_batch_size 128 \
-  --max_train_steps 10000 \
-  --gradient_accumulation_steps 16 \
+  --train_batch_size 256 \
+  --max_train_steps 50000 \
+  --decay_steps 50000 \
+  --gradient_accumulation_steps 64 \
   --tokens_per_second 16618 \
-  --log_terminal_every 100 \
-  --log_metrics_every 100 \
-  --eval_every 100 \
+  --log_terminal_every 300 \
+  --log_metrics_every 300 \
+  --eval_every 300 \
   --log_grads_every -1 \
-  --log_ckpt_every 2000 \
-  --seed 55 \
-  --temperature 2
+  --log_ckpt_every 25000 \
+  --seed 11 \
+  --temperature 1
 
 """
 
@@ -53,7 +54,7 @@ from languini.common_lib.parallel_utils import LOCAL_RANK, WORLD_RANK, WORLD_SIZ
 import languini.projects.gpt.configs as configs
 from languini.projects.gpt.model import Model
 
-TEACHER_CONFIG_NAME = "mini"
+TEACHER_CONFIG_NAME = "medium"
 EXPERIMENT_NOTE = 'gpt_languini' # change this to change the experiment name
 
 def run(config, logger, teacher_config=None):
@@ -206,7 +207,7 @@ def main():
     mprint(f"World size: {WORLD_SIZE}")
     
     # Create the log folder, backup python files, and backup the hyperparameter config to a file
-    logger = experiment_utils.setup_experiment(config)
+    logger = experiment_utils.setup_experiment(config, distil_experiment=True)
 
     
     run(config, logger, teacher_config)

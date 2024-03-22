@@ -13,6 +13,10 @@ python scripts/cifar5m.py --seed 11 --temper_labels --temperature 20 --alpha 1 -
 python scripts/cifar5m.py --seed 11 --fkd --alpha 0.003 --gpus_id 0 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-resnet18 --wandb_project DataEfficientDistillation
 python scripts/cifar5m.py --seed 11 --temperature 1 --alpha 1 --gpus_id 3 --buffer_size 12000 --lr 0.01 --optim_mom 0.8 --checkpoints  --teacher_network resnet18 --student_network resnet50 --batch_size 128 --checkpoints --notes cifar5m-distillation-resnet50-v2 --wandb_project DataEfficientDistillation
 python scripts/cifar5m.py --seed 11 --temperature 20 --alpha 0 --gpus_id 4 --buffer_size 12000 --distillation_type vanilla --batch_size 128  --checkpoints --notes cifar5m-distillation-CNN-NTK --wandb_project DataEfficientDistillation
+python scripts/cifar5m.py --teacher_network resnet18 --student_network resnet18 --alpha 0.9 --buffer_size 12000 --gpus_id 0 --temperature 20 --seed 11 --batch_size 128  --label_smoothing --checkpoints --notes cifar5m-resnet18-distillation-labelsmoothing --wandb_project DataEfficientDistillation
+
+python scripts/cifar5m.py --teacher_network resnet18 --student_network resnet18 --alpha 0.9 --buffer_size 12000 --gpus_id 0 --temperature 20 --seed 11 --batch_size 128  --randomhead --checkpoints --notes cifar5m-resnet18-distillation-randomhead --wandb_project DataEfficientDistillation
+
 
 Using hyperparameters from Torch recipe https://github.com/pytorch/vision/issues/3995#new-recipe-with-reg-tuning 
 
@@ -144,6 +148,9 @@ def parse_args(buffer=False):
     parser.add_argument('--asymmetric_temperature', action='store_true', help='Temperature is only added to the teacher distribution.')
     parser.add_argument('--student_network', type=str, required=False, default="CNN", choices=["resnet18","CNN","mnet","resnet50"],help='Which network to use.')
     parser.add_argument('--teacher_network', type=str, required=False, default="CNN", choices=["resnet18","CNN"],help='Which network to use.')
+    parser.add_argument('--label_smoothing', action='store_true', help='Using manually designed teacher through label smoothing.')
+    parser.add_argument('--augmentations_off', action='store_true', help='Not using augmentations.')
+    parser.add_argument('--randomhead', default=False, action='store_true',help='If provided, the teacher networks head is re-initialised to random.')
 
 
     add_management_args(parser)
@@ -174,6 +181,10 @@ if args.seed is not None:
 
 # dataset -> cifar100 for the teacher and cifar5m for the student
 #C10_train, C10_val = load_dataset('cifar10', augment=AUGMENT)
+
+if args.augmentations_off:
+        AUGMENT = False
+        print("Not using augmentations")
 
 C5m_train, C5m_test = load_dataset('cifar5m', augment=AUGMENT)
 
@@ -311,6 +322,14 @@ wandb.log(df)
 
 
 print(f"Randomly drawing {args.buffer_size} samples for the Cifar5M base")
+
+if args.randomhead:     
+        for (n,m) in teacher.named_children():
+                if n == "fc":
+                        print("Resetting ",n)
+                        m.reset_parameters()
+
+
 teacher.eval() # set the main model to evaluation
 
 random_indices = np.random.choice(list(all_indices), 
@@ -362,6 +381,7 @@ average_magnitude=0
 alpha = args.alpha
 loss_zero = False
 T = args.temperature
+a = 0.99 # label smoothing hp
 # teacher_name = f'{TEACHER_NETWORK}-cifar5m'
 student_name = f'{STUDENT_NETWORK}-{args.alpha}-{args.buffer_size}-{args.seed}-cifar5m'
 ntk_savedir = path = base_path() + "/results" + "/" + "cifar5m" + "/" + f"{TEACHER_NETWORK}/" 
@@ -378,6 +398,11 @@ for e in range(args.n_epochs_stud):
                 inputs, labels = inputs.to(device), labels.to(device)
                 
                 with torch.no_grad(): logits = teacher(inputs)
+                if args.label_smoothing: 
+                       if e==0: print("Label smoothing ON. ")
+                       logits = F.one_hot(labels, num_classes=10).to(torch.float)*a
+                       logits += (1-logits)*((1-a)/(1-10))
+                
                 optimizer.zero_grad()
                 outputs = student(inputs)
 

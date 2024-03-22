@@ -1,6 +1,6 @@
 
 import torchvision.transforms as transforms
-from torchvision.datasets import ImageFolder, CIFAR10, CIFAR100
+from torchvision.datasets import ImageFolder, CIFAR10, CIFAR100, OxfordIIITPet, Food101
 from .cifar5m import Cifar5M, Cifar5MData
 import numpy as np
 
@@ -49,7 +49,7 @@ def load_imagenet(augment=False):
                         normalize,
                     ])
 
-    train_dataset = ImageFolder(imagenet_root+'train', train_transform)
+    train_dataset = ImageFolder(imagenet_root+'train', train_transform if augment else inference_transform)
     val_dataset = ImageFolder(imagenet_root+'val', inference_transform)
 
     return train_dataset, val_dataset
@@ -94,6 +94,68 @@ def load_cifar5m(augment=False):
 
     return train_dataset, val_dataset
 
+def load_food(augment=False):
+    """Loads Food101 dataset"""
+
+    # statistics source: https://github.com/hwchen2017/resnet_food101_cifar10_pytorch/blob/main/food101_resnet.py
+    
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD = (0.229, 0.224, 0.225)
+    food_root = '/local/home/stuff/food101/'
+    normalize = transforms.Normalize(mean=_MEAN, std=_STD)
+
+    standard_processing = [
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(), 
+        normalize
+    ]
+    augmentations = []
+    if augment: augmentations =  [
+                    transforms.RandomResizedCrop(224),
+	                transforms.RandomRotation(45),
+                    transforms.RandomHorizontalFlip()
+                ]
+        
+    train_dataset = Food101(root=food_root, download=True, 
+                            transform=transforms.Compose(augmentations+standard_processing))
+    val_dataset = Food101(root=food_root, split='test', download=True, 
+                                transform=transforms.Compose(standard_processing))
+
+
+    return train_dataset, val_dataset
+
+def load_pet(augment=False):
+    """Loads Oxford Pet III dataset"""
+    # statistics source: https://github.com/Nahid01752/Oxford-IIIT-Pet_CNN/blob/main/Oxford-IIIT%20Pet_CNN.ipynb
+    
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD = (0.229, 0.224, 0.225)
+    pet_root = './data/oxford-pets/'
+    normalize = transforms.Normalize(mean=_MEAN,
+                                    std=_STD)
+
+    standard_processing = [
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(), 
+        normalize
+    ]
+    augmentations = []
+    if augment: augmentations =  [
+                    transforms.RandomResizedCrop(224),
+                    transforms.RandomHorizontalFlip()
+                ]
+        
+    train_dataset = OxfordIIITPet(root=pet_root, download=True, 
+                                  transform=transforms.Compose(augmentations+standard_processing))
+    val_dataset = OxfordIIITPet(root=pet_root, split='test', download=True, 
+                                transform=transforms.Compose(standard_processing))
+
+
+    return train_dataset, val_dataset
+
+
 def load_cifar100(augment=False):
     """Loads cifar100 dataset"""
     # statistics source: https://github.com/weiaicunzai/pytorch-cifar100/blob/master/conf/global_settings.py 
@@ -133,6 +195,12 @@ def load_dataset(name:str, augment=False):
     
     if name=='cifar5m':
         return load_cifar5m(augment)
+    
+    if name=="pet":
+        return load_pet(augment)
+
+    if name=="food":
+        return load_food(augment)
 
     
     raise NotImplementedError
